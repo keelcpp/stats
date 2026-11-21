@@ -46,6 +46,29 @@ if(NOT TARGET keel::specfun)
     FetchContent_MakeAvailable(keel_specfun)
 endif()
 
+if(NOT TARGET keel::linalg)
+    find_package(keel_linalg QUIET CONFIG)
+    if(TARGET keel::keel_linalg AND NOT TARGET keel::linalg)
+        add_library(keel::linalg ALIAS keel::keel_linalg)
+    endif()
+endif()
+if(NOT TARGET keel::linalg)
+    include(FetchContent)
+    set(KEEL_LINALG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    if(KEEL_STATS_NO_EXCEPTIONS_RTTI)
+        set(KEEL_LINALG_NO_EXCEPTIONS_RTTI ON CACHE BOOL "" FORCE)
+    endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../linalg/CMakeLists.txt" AND NOT DEFINED FETCHCONTENT_SOURCE_DIR_KEEL_LINALG)
+        set(FETCHCONTENT_SOURCE_DIR_KEEL_LINALG "${CMAKE_CURRENT_SOURCE_DIR}/../linalg" CACHE PATH "Local keel_linalg checkout")
+    endif()
+    FetchContent_Declare(
+        keel_linalg
+        GIT_REPOSITORY https://github.com/keelcpp/linalg.git
+        GIT_TAG        bfbb5449d06dae36a3bafe8f80700082d8201b01
+    )
+    FetchContent_MakeAvailable(keel_linalg)
+endif()
+
 add_library(keel_stats STATIC
     src/distributions.cpp
     src/descriptive.cpp
@@ -53,10 +76,17 @@ add_library(keel_stats STATIC
     src/linkage.cpp
     src/lasso.cpp
     src/anova.cpp
+    src/regress.cpp
+    src/pca_lda.cpp
+    src/cluster_extra.cpp
+    src/ad_dw.cpp
 )
 add_library(keel::stats ALIAS keel_stats)
 
-target_link_libraries(keel_stats PUBLIC keel::keel keel::specfun)
+target_link_libraries(keel_stats
+    PUBLIC keel::keel keel::specfun
+    PRIVATE keel::linalg
+)
 
 target_compile_features(keel_stats PUBLIC cxx_std_20)
 set_target_properties(keel_stats PROPERTIES

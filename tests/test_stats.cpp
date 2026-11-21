@@ -147,6 +147,114 @@ void test_lasso_and_anova() {
     check_near(fr.q, 6.0, 1e-12, "friedman Q");
 }
 
+void test_regress_pca_lda_cluster_tests() {
+    using namespace keel;
+    namespace st = keel::stats;
+
+    // 1. regress / lscov / ridge / glmfit / glmval
+    const f64 x_ols[10] = {1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 3.0, 4.0, 5.0};
+    const f64 y_ols[5] = {3.1, 4.9, 7.1, 8.9, 11.0};
+    f64 beta[2]{}, bint[4]{}, r[5]{}, rint[10]{};
+    st::RegressStats rs{};
+    check(st::regress(y_ols, x_ols, 5, 2, 0.05, beta, bint, r, rint, rs) == st::StatsStatus::kOk,
+          "regress ok");
+    check_near(beta[0], 1.0, 0.1, "regress intercept");
+    check_near(beta[1], 2.0, 0.05, "regress slope");
+    check(rs.r2 > 0.99, "regress r2");
+
+    f64 lx[2]{}, lstd[2]{}, lmse = 0.0, lS[4]{};
+    check(st::lscov(x_ols, y_ols, 5, 2, {}, false, lx, lstd, lmse, lS) == st::StatsStatus::kOk,
+          "lscov ok");
+    check_near(lx[1], beta[1], 1e-12, "lscov matches regress");
+
+    const f64 x1[5] = {1.0, 2.0, 3.0, 4.0, 5.0};
+    const f64 kv[1] = {0.0};
+    f64 rb[2]{};
+    check(st::ridge(y_ols, x1, 5, 1, kv, false, rb) == st::StatsStatus::kOk, "ridge ok");
+    check_near(rb[1], beta[1], 1e-10, "ridge k=0 matches OLS");
+
+    st::GlmFitOut gfit;
+    check(st::glmfit(x1, y_ols, 5, 1, st::GlmDist::kNormal, st::GlmLink::kIdentity, gfit) ==
+              st::StatsStatus::kOk,
+          "glmfit normal ok");
+    check_near(gfit.beta[1], beta[1], 1e-8, "glmfit normal slope");
+    f64 gpred[5]{};
+    check(st::glmval(gfit.beta.as_ref(), x1, 5, 1, st::GlmLink::kIdentity, gpred) ==
+              st::StatsStatus::kOk,
+          "glmval ok");
+    check_near(gpred[2], 7.0, 0.1, "glmval pred");
+
+    // 2. pca / pcacov / pcares / lda_classify / nearcorr
+    const f64 x_pca[8] = {1.0, 2.0, 3.0, 4.0, 2.0, 4.0, 6.0, 8.0};
+    f64 coeff[4]{}, score[8]{}, latent[2]{}, tsq[4]{}, expl[2]{}, mu[2]{};
+    check(st::pca(x_pca, 4, 2, coeff, score, latent, tsq, expl, mu) == st::StatsStatus::kOk,
+          "pca ok");
+    check_near(expl[0], 100.0, 1e-10, "pca collinear 100% explained");
+    check_near(latent[1], 0.0, 1e-12, "pca second latent 0");
+
+    f64 res[8]{}, recon[8]{};
+    check(st::pcares(x_pca, 4, 2, 1, res, recon) == st::StatsStatus::kOk, "pcares ok");
+    check_near(res[0], 0.0, 1e-12, "pcares 1 component exact");
+
+    // LDA on two well-separated 2D classes
+    const f64 tr[16] = {0.0, 0.2, -0.2, 0.1, 10.0, 10.2, 9.8, 10.1,
+                        0.1, -0.1, 0.2, -0.2, 10.1, 9.9, 10.2, 9.8};
+    const f64 grp[8] = {1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0};
+    const f64 smp[4] = {0.05, 9.95, 0.0, 10.0};
+    st::LdaResult lda;
+    check(st::lda_classify(smp, 2, tr, 8, 2, grp, st::DiscrimType::kLinear, lda) ==
+              st::StatsStatus::kOk,
+          "lda ok");
+    check_near(lda.pred[0], 1.0, 1e-12, "lda class 1");
+    check_near(lda.pred[1], 2.0, 1e-12, "lda class 2");
+    check_near(lda.train_error, 0.0, 1e-12, "lda 0 train error");
+
+    // nearcorr on non-PSD symmetric unit-diagonal matrix
+    const f64 bad_corr[9] = {1.0, 0.9, 0.9, 0.9, 1.0, -0.9, 0.9, -0.9, 1.0};
+    f64 nc[9]{};
+    check(st::nearcorr(bad_corr, 3, {}, 1e-8, 200, nc) == st::StatsStatus::kOk, "nearcorr ok");
+    check_near(nc[0], 1.0, 1e-12, "nearcorr unit diag 0");
+    check_near(nc[4], 1.0, 1e-12, "nearcorr unit diag 1");
+    check_near(nc[8], 1.0, 1e-12, "nearcorr unit diag 2");
+
+    // 3. kmedoids_pam_step / dbscan / silhouette
+    const f64 pts[12] = {0.0, 0.1, 0.2, 10.0, 10.1, 10.2,
+                         0.0, 0.1, -0.1, 10.0, 10.1, 9.9};
+    const i32 init_m[2] = {0, 3};
+    i32 km_idx[6]{}, km_med[2]{};
+    f64 km_sumd[2]{}, km_tot = 0.0;
+    i32 km_iters = 0;
+    check(st::kmedoids_pam_step(pts, 6, 2, init_m, 50, st::DistanceMetric::kEuclidean, 2.0,
+                                km_idx, km_med, km_sumd, km_tot, km_iters) == st::StatsStatus::kOk,
+          "kmedoids ok");
+    check(km_idx[0] == km_idx[1] && km_idx[3] == km_idx[4] && km_idx[0] != km_idx[3],
+          "kmedoids separates 2 clusters");
+
+    i32 db_lbl[6]{};
+    u8 db_core[6]{};
+    check(st::dbscan(pts, 6, 2, 1.0, 2, st::DistanceMetric::kEuclidean, 2.0, false, db_lbl,
+                     db_core) == st::StatsStatus::kOk,
+          "dbscan ok");
+    check(db_lbl[0] == 1 && db_lbl[2] == 1 && db_lbl[3] == 2 && db_lbl[5] == 2,
+          "dbscan separates 2 clusters");
+
+    f64 sil[6]{};
+    check(st::silhouette(pts, 6, 2, db_lbl, st::DistanceMetric::kEuclidean, 2.0, sil) ==
+              st::StatsStatus::kOk,
+          "silhouette ok");
+    check(sil[0] > 0.9 && sil[3] > 0.9, "silhouette high for well-separated clusters");
+
+    // 4. adtest / dwtest
+    const f64 norm_samp[10] = {-1.5, -1.0, -0.6, -0.3, -0.1, 0.1, 0.3, 0.6, 1.0, 1.5};
+    st::AdTestResult ad{};
+    check(st::adtest(norm_samp, 0.05, ad) == st::StatsStatus::kOk, "adtest ok");
+    check(ad.h == 0 && ad.p > 0.05, "adtest accepts normal sample");
+
+    st::DwTestResult dw{};
+    check(st::dwtest(r, x_ols, 5, 2, true, dw) == st::StatsStatus::kOk, "dwtest exact ok");
+    check(dw.dw > 0.0 && dw.dw < 4.0 && dw.p_both >= 0.0 && dw.p_both <= 1.0, "dwtest valid range");
+}
+
 } // namespace
 
 int main() {
@@ -154,6 +262,7 @@ int main() {
     test_discrete_and_descriptive();
     test_distance_and_linkage();
     test_lasso_and_anova();
+    test_regress_pca_lda_cluster_tests();
     if (g_failures == 0) {
         std::printf("ALL keel::stats TESTS PASSED\n");
         return 0;

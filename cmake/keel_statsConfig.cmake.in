@@ -3,6 +3,7 @@
 include(CMakeFindDependencyMacro)
 find_dependency(keel)
 find_dependency(keel_specfun)
+find_dependency(keel_linalg)
 
 include("${CMAKE_CURRENT_LIST_DIR}/keel_statsTargets.cmake")
 

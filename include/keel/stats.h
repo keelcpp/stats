@@ -291,4 +291,180 @@ struct FriedmanResult {
 [[nodiscard]] StatsStatus friedman(ArrayRef<f64> x_col_major, usize rows, usize cols, i32 reps,
                                    FriedmanResult& out, Allocator* alloc = nullptr);
 
+// ============================================================================
+// Linear, Weighted, Ridge & Generalized Linear Regression
+// ============================================================================
+
+struct RegressStats {
+    f64 r2 = 0.0;
+    f64 f = 0.0;
+    f64 p_f = 0.0;
+    f64 sigma2 = 0.0;
+};
+
+// OLS regression `y ~ X * beta` (`x_col_major` is `n x p`, `y` has length `n`).
+// `out_beta` (p), `out_bint` (p x 2 col-major), `out_r` (n), `out_rint` (n x 2 col-major).
+[[nodiscard]] StatsStatus regress(ArrayRef<f64> y, ArrayRef<f64> x_col_major, usize n, usize p,
+                                  f64 alpha, MutArrayRef<f64> out_beta,
+                                  MutArrayRef<f64> out_bint_col_major, MutArrayRef<f64> out_r,
+                                  MutArrayRef<f64> out_rint_col_major, RegressStats& out_stats,
+                                  Allocator* alloc = nullptr);
+
+// Weighted or generalized least squares `A * x ~ b`.
+// Pass empty `weights` for OLS, length-`n` diagonal weights (`is_full_cov == false`),
+// or `n x n` column-major SPD covariance (`is_full_cov == true`).
+[[nodiscard]] StatsStatus lscov(ArrayRef<f64> a_col_major, ArrayRef<f64> b, usize n, usize p,
+                                ArrayRef<f64> weights, bool is_full_cov, MutArrayRef<f64> out_x,
+                                MutArrayRef<f64> out_stdx, f64& out_mse,
+                                MutArrayRef<f64> out_s_col_major, Allocator* alloc = nullptr);
+
+// Ridge regression (`out_b_col_major` is `(scaled ? p : p + 1) x k_vals.size()`).
+[[nodiscard]] StatsStatus ridge(ArrayRef<f64> y, ArrayRef<f64> x_col_major, usize n, usize p,
+                                ArrayRef<f64> k_vals, bool scaled,
+                                MutArrayRef<f64> out_b_col_major, Allocator* alloc = nullptr);
+
+enum class GlmDist : u8 {
+    kNormal = 0,
+    kBinomial,
+    kPoisson,
+    kGamma,
+    kInverseGaussian,
+};
+
+enum class GlmLink : u8 {
+    kIdentity = 0,
+    kLogit,
+    kLog,
+    kReciprocal,
+    kProbit,
+};
+
+struct GlmFitOut {
+    Array<f64> beta;      // length p = p_in + 1 (intercept first)
+    f64 deviance = 0.0;
+    f64 dfe = 0.0;
+    f64 sfit = 0.0;
+    f64 s = 1.0;
+    bool estdisp = false;
+    Array<f64> covb;      // p x p col-major
+    Array<f64> se;        // p
+    Array<f64> coeffcorr; // p x p col-major
+    Array<f64> t_stat;    // p
+    Array<f64> resid;     // n
+    Array<f64> wts;       // n
+
+    explicit GlmFitOut(Allocator* alloc = nullptr)
+        : beta(alloc), covb(alloc), se(alloc), coeffcorr(alloc), t_stat(alloc), resid(alloc),
+          wts(alloc) {}
+};
+
+[[nodiscard]] StatsStatus glmfit(ArrayRef<f64> x_col_major, ArrayRef<f64> y, usize n, usize p_in,
+                                 GlmDist distr, GlmLink link, GlmFitOut& out,
+                                 Allocator* alloc = nullptr);
+
+[[nodiscard]] StatsStatus glmval(ArrayRef<f64> beta, ArrayRef<f64> x_col_major, usize m, usize p_in,
+                                 GlmLink link, MutArrayRef<f64> out_y) noexcept;
+
+// ============================================================================
+// PCA, Linear/Quadratic Discriminant Analysis & Nearest Correlation Matrix
+// ============================================================================
+
+// PCA on `n x d` column-major `x`.
+// Outputs: `coeff` (`d x d`), `score` (`n x d`), `latent` (`d`), `tsq` (`n`),
+// `explained` (`d`), `mu` (`d`). Any output slice except `coeff`/`latent` may be empty.
+[[nodiscard]] StatsStatus pca(ArrayRef<f64> x_col_major, usize n, usize d,
+                              MutArrayRef<f64> out_coeff_col_major,
+                              MutArrayRef<f64> out_score_col_major, MutArrayRef<f64> out_latent,
+                              MutArrayRef<f64> out_tsq, MutArrayRef<f64> out_explained,
+                              MutArrayRef<f64> out_mu, Allocator* alloc = nullptr);
+
+// PCA directly from a `d x d` column-major covariance matrix `c`.
+[[nodiscard]] StatsStatus pcacov(ArrayRef<f64> c_col_major, usize d,
+                                 MutArrayRef<f64> out_coeff_col_major, MutArrayRef<f64> out_latent,
+                                 MutArrayRef<f64> out_explained, Allocator* alloc = nullptr);
+
+// PCA reconstruction and residuals keeping `ndim` principal components.
+[[nodiscard]] StatsStatus pcares(ArrayRef<f64> x_col_major, usize n, usize d, usize ndim,
+                                 MutArrayRef<f64> out_res_col_major,
+                                 MutArrayRef<f64> out_recon_col_major, Allocator* alloc = nullptr);
+
+enum class DiscrimType : u8 {
+    kLinear = 0,
+    kDiagLinear,
+    kQuadratic,
+    kDiagQuadratic,
+};
+
+struct LdaResult {
+    Array<f64> pred;      // n_samp
+    f64 train_error = 0.0;
+    Array<f64> posterior; // n_samp x K col-major
+    Array<f64> logp;      // n_samp
+    usize num_classes = 0;
+
+    explicit LdaResult(Allocator* alloc = nullptr)
+        : pred(alloc), posterior(alloc), logp(alloc) {}
+};
+
+[[nodiscard]] StatsStatus lda_classify(ArrayRef<f64> sample_col_major, usize n_samp,
+                                       ArrayRef<f64> training_col_major, usize n_tr, usize d,
+                                       ArrayRef<f64> group_labels, DiscrimType type,
+                                       LdaResult& out, Allocator* alloc = nullptr);
+
+// Higham (2002) alternating projections with Dykstra correction for nearest correlation matrix.
+// Pass empty `w_scale_col_major` for unweighted, or `n x n` sqrt-weight matrix.
+[[nodiscard]] StatsStatus nearcorr(ArrayRef<f64> a_col_major, usize n,
+                                   ArrayRef<f64> w_scale_col_major, f64 tol, i64 max_iter,
+                                   MutArrayRef<f64> out_col_major, Allocator* alloc = nullptr);
+
+// ============================================================================
+// Clustering Extras (k-medoids PAM, DBSCAN, Silhouette)
+// ============================================================================
+
+// Single replicate of PAM k-medoids given initial 0-based medoid indices `init_medoids` (length k).
+// Writes 0-based `out_idx` (n), 0-based `out_medoids` (k), `out_sumd` (k), `out_total`, `out_iters`.
+[[nodiscard]] StatsStatus kmedoids_pam_step(ArrayRef<f64> x_col_major, usize n, usize d,
+                                            ArrayRef<i32> init_medoids, i32 max_iter,
+                                            DistanceMetric metric, f64 minkowski_p,
+                                            MutArrayRef<i32> out_idx, MutArrayRef<i32> out_medoids,
+                                            MutArrayRef<f64> out_sumd, f64& out_total,
+                                            i32& out_iters, Allocator* alloc = nullptr);
+
+// DBSCAN density clustering. If `precomputed == true`, `x_col_major` is `n x n` distance matrix.
+// Writes `out_labels` (`-1` for noise, `1..C` for clusters) and `out_core` (`0`/`1`).
+[[nodiscard]] StatsStatus dbscan(ArrayRef<f64> x_col_major, usize n, usize d, f64 eps, i32 minpts,
+                                 DistanceMetric metric, f64 minkowski_p, bool precomputed,
+                                 MutArrayRef<i32> out_labels, MutArrayRef<u8> out_core,
+                                 Allocator* alloc = nullptr);
+
+// Silhouette score per point on `n x d` column-major `x` with integer cluster labels.
+[[nodiscard]] StatsStatus silhouette(ArrayRef<f64> x_col_major, usize n, usize d,
+                                     ArrayRef<i32> labels, DistanceMetric metric, f64 minkowski_p,
+                                     MutArrayRef<f64> out_s, Allocator* alloc = nullptr);
+
+// ============================================================================
+// Hypothesis Tests (Anderson-Darling Normality & Durbin-Watson Autocorrelation)
+// ============================================================================
+
+struct AdTestResult {
+    i32 h = 0;
+    f64 p = 0.0;
+    f64 adstat = 0.0;
+    f64 cv = 0.752;
+};
+
+// Anderson-Darling test for normality (parameters estimated, NaNs dropped).
+[[nodiscard]] StatsStatus adtest(ArrayRef<f64> x, f64 alpha, AdTestResult& out,
+                                 Allocator* alloc = nullptr);
+
+struct DwTestResult {
+    f64 dw = 0.0;
+    f64 p_left = 0.0;
+    f64 p_both = 0.0;
+};
+
+// Durbin-Watson autocorrelation test (`exact == true` uses Imhof CF inversion).
+[[nodiscard]] StatsStatus dwtest(ArrayRef<f64> r, ArrayRef<f64> x_col_major, usize n, usize k,
+                                 bool exact, DwTestResult& out, Allocator* alloc = nullptr);
+
 } // namespace keel::stats
