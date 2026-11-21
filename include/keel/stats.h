@@ -125,4 +125,170 @@ struct Moments {
 /// Standardize `x` into `out` as (x - mean) / std.
 void zscore(ArrayRef<f64> x, MutArrayRef<f64> out, bool population = false) noexcept;
 
+// ============================================================================
+// Pairwise Distances & Mahalanobis
+// ============================================================================
+
+enum class StatsStatus : u8 {
+    kOk = 0,
+    kInvalidArgument,
+    kSingularMatrix,
+};
+
+enum class DistanceMetric : u8 {
+    kEuclidean = 0,
+    kSqEuclidean,
+    kCityblock,
+    kChebychev,
+    kMinkowski,
+    kCosine,
+    kCorrelation,
+    kHamming,
+    kJaccard,
+    kMahalanobis,
+    kSeuclidean,
+    kSpearman,
+};
+
+// Pairwise condensed distance vector of `rows x cols` column-major `x`.
+// `out` has length `rows * (rows - 1) / 2`.
+// For `kMahalanobis`, optional `extra_param` is `cols x cols` column-major covariance.
+// For `kSeuclidean`, optional `extra_param` is length-`cols` scale vector.
+[[nodiscard]] StatsStatus pdist(ArrayRef<f64> x_col_major, usize rows, usize cols,
+                                DistanceMetric metric, f64 minkowski_p, ArrayRef<f64> extra_param,
+                                MutArrayRef<f64> out, Allocator* alloc = nullptr);
+
+// Cross-distance matrix (`mx x my` column-major) between `x` (`mx x cols`) and `y` (`my x cols`).
+[[nodiscard]] StatsStatus pdist2(ArrayRef<f64> x_col_major, usize mx, ArrayRef<f64> y_col_major,
+                                 usize my, usize cols, DistanceMetric metric, f64 minkowski_p,
+                                 ArrayRef<f64> extra_param, MutArrayRef<f64> out_col_major,
+                                 Allocator* alloc = nullptr);
+
+// Condensed <-> square symmetric distance matrix conversions.
+[[nodiscard]] StatsStatus squareform_to_matrix(ArrayRef<f64> condensed, usize n,
+                                               MutArrayRef<f64> out_col_major) noexcept;
+[[nodiscard]] StatsStatus squareform_to_condensed(ArrayRef<f64> mat_col_major, usize n,
+                                                  MutArrayRef<f64> out_condensed) noexcept;
+
+// Rank-safe QR-based squared Mahalanobis distance of each row of `y` (`my x cols`)
+// relative to reference sample `x` (`mx x cols`, `mx >= 2`).
+[[nodiscard]] StatsStatus mahal_qr(ArrayRef<f64> y_col_major, usize my, ArrayRef<f64> x_col_major,
+                                   usize mx, usize cols, MutArrayRef<f64> out_d2,
+                                   Allocator* alloc = nullptr);
+
+// ============================================================================
+// Hierarchical Clustering (Linkage, Cophenet, Inconsistent, Cluster)
+// ============================================================================
+
+enum class LinkageMethod : u8 {
+    kSingle = 0,
+    kComplete,
+    kAverage,
+    kWeighted,
+    kCentroid,
+    kMedian,
+    kWard,
+};
+
+// Agglomerative linkage on condensed `pdist` vector of length `n*(n-1)/2`.
+// Writes `(n - 1) x 3` column-major tree `[id_a, id_b, dist]` (1-based node IDs).
+[[nodiscard]] StatsStatus linkage(ArrayRef<f64> pdist_condensed, usize n, LinkageMethod method,
+                                  MutArrayRef<f64> out_z_col_major, Allocator* alloc = nullptr);
+
+// Inconsistency coefficients (`num_merges x 4` column-major: mean, std, count, coeff).
+[[nodiscard]] StatsStatus inconsistent(ArrayRef<f64> z_col_major, usize num_merges, i32 depth,
+                                       MutArrayRef<f64> out_col_major, Allocator* alloc = nullptr);
+
+// Flatten linkage tree into `max_clust` clusters (writes 1-based labels of length `num_merges + 1`).
+[[nodiscard]] StatsStatus cluster_maxclust(ArrayRef<f64> z_col_major, usize num_merges,
+                                           i32 max_clust, MutArrayRef<i32> out_labels,
+                                           Allocator* alloc = nullptr);
+
+// Flatten linkage tree by distance (`by_distance == true`) or inconsistency cutoff.
+[[nodiscard]] StatsStatus cluster_cutoff(ArrayRef<f64> z_col_major, usize num_merges, f64 cutoff,
+                                         bool by_distance, i32 depth, MutArrayRef<i32> out_labels,
+                                         Allocator* alloc = nullptr);
+
+// Cophenetic correlation coefficient & condensed cophenetic distances (`out_dcoph` may be empty).
+[[nodiscard]] StatsStatus cophenet(ArrayRef<f64> z_col_major, usize num_merges,
+                                   ArrayRef<f64> pdist_condensed, MutArrayRef<f64> out_dcoph,
+                                   f64& out_corr, Allocator* alloc = nullptr);
+
+// ============================================================================
+// Regularized Regression (LASSO / Elastic-Net & GLM-LASSO)
+// ============================================================================
+
+enum class GlmFamily : u8 {
+    kNormal = 0,
+    kBinomial,
+    kPoisson,
+};
+
+// Cyclic coordinate-descent LASSO / elastic-net (`alpha in [0, 1]`).
+// `out_b_col_major` is `p x lambdas.size()`; `out_intercept` has length `lambdas.size()`.
+[[nodiscard]] StatsStatus lasso(ArrayRef<f64> x_col_major, usize n, usize p, ArrayRef<f64> y,
+                                ArrayRef<f64> lambdas, f64 alpha, MutArrayRef<f64> out_b_col_major,
+                                MutArrayRef<f64> out_intercept, Allocator* alloc = nullptr);
+
+// IRLS + coordinate-descent regularized GLM (Normal / Binomial / Poisson).
+[[nodiscard]] StatsStatus lassoglm(ArrayRef<f64> x_col_major, usize n, usize p, ArrayRef<f64> y,
+                                   GlmFamily family, ArrayRef<f64> lambdas, f64 alpha,
+                                   MutArrayRef<f64> out_b_col_major, MutArrayRef<f64> out_intercept,
+                                   Allocator* alloc = nullptr);
+
+// ============================================================================
+// Analysis of Variance & Nonparametric Rank Tests
+// ============================================================================
+
+struct Anova1Result {
+    f64 p = 0.0;
+    f64 f = 0.0;
+    f64 df_between = 0.0;
+    f64 df_within = 0.0;
+    f64 ss_between = 0.0;
+    f64 ss_within = 0.0;
+};
+
+struct Anova2Result {
+    f64 p_cols = 0.0;
+    f64 p_rows = 0.0;
+    f64 f_cols = 0.0;
+    f64 f_rows = 0.0;
+    f64 df_cols = 0.0;
+    f64 df_rows = 0.0;
+    f64 df_err = 0.0;
+    f64 ss_cols = 0.0;
+    f64 ss_rows = 0.0;
+    f64 ss_err = 0.0;
+};
+
+struct KruskalResult {
+    f64 p = 0.0;
+    f64 h = 0.0;
+    f64 df = 0.0;
+    f64 sum_r2_n = 0.0;
+};
+
+struct FriedmanResult {
+    f64 p = 0.0;
+    f64 q = 0.0;
+    f64 df = 0.0;
+};
+
+// One-way ANOVA on concatenated group values (`group_offsets` has length K + 1).
+[[nodiscard]] StatsStatus anova1_grouped(ArrayRef<f64> values, ArrayRef<usize> group_offsets,
+                                         Anova1Result& out) noexcept;
+
+// Two-way ANOVA without replication on `rows x cols` column-major matrix `y`.
+[[nodiscard]] StatsStatus anova2(ArrayRef<f64> y_col_major, usize rows, usize cols,
+                                 Anova2Result& out, Allocator* alloc = nullptr);
+
+// Kruskal-Wallis nonparametric one-way rank test on concatenated group values.
+[[nodiscard]] StatsStatus kruskal_wallis(ArrayRef<f64> values, ArrayRef<usize> group_offsets,
+                                         KruskalResult& out, Allocator* alloc = nullptr);
+
+// Friedman nonparametric two-way block rank test (`reps >= 1` replicates per cell).
+[[nodiscard]] StatsStatus friedman(ArrayRef<f64> x_col_major, usize rows, usize cols, i32 reps,
+                                   FriedmanResult& out, Allocator* alloc = nullptr);
+
 } // namespace keel::stats

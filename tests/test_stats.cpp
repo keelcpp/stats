@@ -69,11 +69,91 @@ void test_discrete_and_descriptive() {
     check(std::isnan(keel::stats::mean({})), "empty mean is NaN");
 }
 
+void test_distance_and_linkage() {
+    using namespace keel;
+    namespace st = keel::stats;
+
+    // 4 points in 2D (col-major 4x2): (0,0), (0,1), (10,0), (10,1)
+    const f64 x[8] = {0.0, 0.0, 10.0, 10.0, 0.0, 1.0, 0.0, 1.0};
+    f64 d[6]{};
+    check(st::pdist(x, 4, 2, st::DistanceMetric::kEuclidean, 2.0, {}, d) == st::StatsStatus::kOk,
+          "pdist ok");
+    check_near(d[0], 1.0, 1e-14, "pdist(0,1)");
+    check_near(d[5], 1.0, 1e-14, "pdist(2,3)");
+
+    f64 sq[16]{}, back[6]{};
+    check(st::squareform_to_matrix(d, 4, sq) == st::StatsStatus::kOk, "squareform to mat");
+    check(st::squareform_to_condensed(sq, 4, back) == st::StatsStatus::kOk, "squareform back");
+    for (usize i = 0; i < 6; ++i) check_near(back[i], d[i], 1e-14, "squareform roundtrip");
+
+    // Linkage -> 2 clusters should group {0,1} and {2,3}
+    f64 z[3 * 3]{};
+    check(st::linkage(d, 4, st::LinkageMethod::kSingle, z) == st::StatsStatus::kOk, "linkage ok");
+    i32 labels[4]{};
+    check(st::cluster_maxclust(z, 3, 2, labels) == st::StatsStatus::kOk, "cluster_maxclust ok");
+    check(labels[0] == labels[1] && labels[2] == labels[3] && labels[0] != labels[2],
+          "cluster separation");
+
+    f64 dcoph[6]{}, corr = 0.0;
+    check(st::cophenet(z, 3, d, dcoph, corr) == st::StatsStatus::kOk, "cophenet ok");
+    check(corr > 0.99, "cophenet high corr");
+
+    f64 inc[3 * 4]{};
+    check(st::inconsistent(z, 3, 2, inc) == st::StatsStatus::kOk, "inconsistent ok");
+
+    // QR Mahalanobis distance on well-conditioned 4x2 points
+    const f64 ref_x[8] = {0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 3.0};
+    const f64 qry[2] = {0.75, 1.0}; // mean of ref_x
+    f64 md2[1]{};
+    check(st::mahal_qr(qry, 1, ref_x, 4, 2, md2) == st::StatsStatus::kOk, "mahal_qr ok");
+    check_near(md2[0], 0.0, 1e-12, "mahal_qr at mean == 0");
+}
+
+void test_lasso_and_anova() {
+    using namespace keel;
+    namespace st = keel::stats;
+
+    // LASSO recovers y = 2 + 3*x1 + 0*x2 with small lambda
+    const f64 x[10] = {1.0, 2.0, 3.0, 4.0, 5.0, 2.0, 1.0, 4.0, 3.0, 5.0};
+    const f64 y[5] = {5.0, 8.0, 11.0, 14.0, 17.0};
+    const f64 lam[2] = {1e-5, 100.0};
+    f64 b[4]{}, interc[2]{};
+    check(st::lasso(x, 5, 2, y, lam, 1.0, b, interc) == st::StatsStatus::kOk, "lasso ok");
+    check_near(b[0], 3.0, 1e-3, "lasso coef 1");
+    check_near(b[1], 0.0, 1e-3, "lasso coef 2");
+    check_near(interc[0], 2.0, 1e-2, "lasso intercept");
+    check_near(b[2], 0.0, 1e-12, "lasso large lambda shrinks to 0");
+    check_near(b[3], 0.0, 1e-12, "lasso large lambda shrinks to 0");
+
+    // One-way ANOVA + Kruskal-Wallis
+    const f64 vals[9] = {1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 20.0, 21.0, 22.0};
+    const usize offs[4] = {0, 3, 6, 9};
+    st::Anova1Result a1;
+    check(st::anova1_grouped(vals, offs, a1) == st::StatsStatus::kOk, "anova1 ok");
+    check(a1.p < 1e-4 && a1.f > 100.0, "anova1 detects separated groups");
+
+    st::KruskalResult kw;
+    check(st::kruskal_wallis(vals, offs, kw) == st::StatsStatus::kOk, "kruskal_wallis ok");
+    check(kw.p < 0.05 && kw.df == 2.0, "kruskal_wallis detects separated groups");
+
+    // Two-way ANOVA & Friedman
+    const f64 m2[9] = {1.0, 2.0, 3.0, 11.0, 12.0, 13.0, 21.0, 22.0, 23.0};
+    st::Anova2Result a2;
+    check(st::anova2(m2, 3, 3, a2) == st::StatsStatus::kOk, "anova2 ok");
+    check_near(a2.ss_err, 0.0, 1e-12, "anova2 additive exact");
+
+    st::FriedmanResult fr;
+    check(st::friedman(m2, 3, 3, 1, fr) == st::StatsStatus::kOk, "friedman ok");
+    check_near(fr.q, 6.0, 1e-12, "friedman Q");
+}
+
 } // namespace
 
 int main() {
     test_continuous_distributions();
     test_discrete_and_descriptive();
+    test_distance_and_linkage();
+    test_lasso_and_anova();
     if (g_failures == 0) {
         std::printf("ALL keel::stats TESTS PASSED\n");
         return 0;
