@@ -35,7 +35,7 @@ f64 mean(ArrayRef<f64> x) noexcept {
     if (n == 0) return qnan();
     f64 sum = 0.0;
     for (usize i = 0; i < n; ++i) sum += x[i];
-    return sum / static_cast<f64>(n);
+    return sum / as<f64>(n);
 }
 
 f64 var(ArrayRef<f64> x, bool population) noexcept {
@@ -48,7 +48,7 @@ f64 var(ArrayRef<f64> x, bool population) noexcept {
         const f64 d = x[i] - m;
         ss += d * d;
     }
-    const f64 denom = population ? static_cast<f64>(n) : static_cast<f64>(n - 1);
+    const f64 denom = population ? as<f64>(n) : as<f64>(n - 1);
     return ss / denom;
 }
 
@@ -68,7 +68,7 @@ f64 skewness(ArrayRef<f64> x, bool bias_corrected) noexcept {
         m2 += d2;
         m3 += d2 * d;
     }
-    const f64 nf = static_cast<f64>(n);
+    const f64 nf = as<f64>(n);
     m2 /= nf;
     m3 /= nf;
     if (m2 == 0.0) return qnan();
@@ -90,7 +90,7 @@ f64 kurtosis(ArrayRef<f64> x, bool bias_corrected) noexcept {
         m2 += d2;
         m4 += d2 * d2;
     }
-    const f64 nf = static_cast<f64>(n);
+    const f64 nf = as<f64>(n);
     m2 /= nf;
     m4 /= nf;
     if (m2 == 0.0) return qnan();
@@ -108,7 +108,7 @@ f64 cov(ArrayRef<f64> x, ArrayRef<f64> y, bool population) noexcept {
     const f64 my = mean(y);
     f64 s = 0.0;
     for (usize i = 0; i < n; ++i) s += (x[i] - mx) * (y[i] - my);
-    return s / static_cast<f64>(population ? n : (n - 1));
+    return s / as<f64>(population ? n : (n - 1));
 }
 
 f64 corrcoef(ArrayRef<f64> x, ArrayRef<f64> y) noexcept {
@@ -142,11 +142,11 @@ f64 quantile(ArrayRef<f64> x, f64 p, Allocator* alloc) {
     sort_f64(sorted.data(), n);
     if (n == 1) return sorted[0];
 
-    const f64 pos = p * static_cast<f64>(n) - 0.5;
+    const f64 pos = p * as<f64>(n) - 0.5;
     if (pos <= 0.0) return sorted[0];
-    if (pos >= static_cast<f64>(n - 1)) return sorted[n - 1];
-    const usize lo = static_cast<usize>(floor(pos));
-    const f64 frac = pos - static_cast<f64>(lo);
+    if (pos >= as<f64>(n - 1)) return sorted[n - 1];
+    const usize lo = as<usize>(floor(pos));
+    const f64 frac = pos - as<f64>(lo);
     return sorted[lo] * (1.0 - frac) + sorted[lo + 1] * frac;
 }
 
