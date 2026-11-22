@@ -80,6 +80,8 @@ add_library(keel_stats STATIC
     src/pca_lda.cpp
     src/cluster_extra.cpp
     src/ad_dw.cpp
+    src/copulas.cpp
+    src/mvdist.cpp
 )
 add_library(keel::stats ALIAS keel_stats)
 

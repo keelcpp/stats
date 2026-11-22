@@ -467,4 +467,61 @@ struct DwTestResult {
 [[nodiscard]] StatsStatus dwtest(ArrayRef<f64> r, ArrayRef<f64> x_col_major, usize n, usize k,
                                  bool exact, DwTestResult& out, Allocator* alloc = nullptr);
 
+// ============================================================================
+// Copulas (Gaussian, Student-t, Clayton, Frank, Gumbel)
+// ============================================================================
+
+[[nodiscard]] f64 bivnorm_cdf(f64 a, f64 b, f64 rho) noexcept;
+
+[[nodiscard]] StatsStatus copula_pdf_gaussian(ArrayRef<f64> u_col_major, usize n, usize d,
+                                              ArrayRef<f64> r_col_major, MutArrayRef<f64> out,
+                                              Allocator* alloc = nullptr);
+[[nodiscard]] StatsStatus copula_cdf_gaussian_2d(ArrayRef<f64> u_col_major, usize n, f64 rho,
+                                                 MutArrayRef<f64> out) noexcept;
+
+[[nodiscard]] StatsStatus copula_pdf_t(ArrayRef<f64> u_col_major, usize n, usize d,
+                                       ArrayRef<f64> r_col_major, f64 nu, MutArrayRef<f64> out,
+                                       Allocator* alloc = nullptr);
+
+[[nodiscard]] StatsStatus copula_pdf_clayton(ArrayRef<f64> u_col_major, usize n, f64 alpha,
+                                             MutArrayRef<f64> out) noexcept;
+[[nodiscard]] StatsStatus copula_cdf_clayton(ArrayRef<f64> u_col_major, usize n, f64 alpha,
+                                             MutArrayRef<f64> out) noexcept;
+
+[[nodiscard]] StatsStatus copula_pdf_frank(ArrayRef<f64> u_col_major, usize n, f64 alpha,
+                                           MutArrayRef<f64> out) noexcept;
+[[nodiscard]] StatsStatus copula_cdf_frank(ArrayRef<f64> u_col_major, usize n, f64 alpha,
+                                           MutArrayRef<f64> out) noexcept;
+
+[[nodiscard]] StatsStatus copula_pdf_gumbel(ArrayRef<f64> u_col_major, usize n, f64 alpha,
+                                            MutArrayRef<f64> out) noexcept;
+[[nodiscard]] StatsStatus copula_cdf_gumbel(ArrayRef<f64> u_col_major, usize n, f64 alpha,
+                                            MutArrayRef<f64> out) noexcept;
+
+// ============================================================================
+// Multivariate Densities (mvnpdf, mvtpdf, mnpdf)
+// ============================================================================
+
+// Multivariate normal PDF for centered `n x d` `x0_col_major` and `d x d` PSD `sigma_col_major`.
+// Returns `kSingularMatrix` if `sigma` is not positive semi-definite.
+[[nodiscard]] StatsStatus mvnpdf_full(ArrayRef<f64> x0_col_major, usize n, usize d,
+                                      ArrayRef<f64> sigma_col_major, MutArrayRef<f64> out,
+                                      Allocator* alloc = nullptr);
+
+// Multivariate normal PDF for centered `n x d` `x0_col_major` and positive diagonal variances.
+[[nodiscard]] StatsStatus mvnpdf_diag(ArrayRef<f64> x0_col_major, usize n, usize d,
+                                      ArrayRef<f64> diag_var, MutArrayRef<f64> out) noexcept;
+
+// Multivariate Student-t PDF for `n x d` `x_col_major`, `d x d` PSD `corr_col_major`
+// (automatically standardized to unit diagonal), and length-`n` positive `df_per_row`.
+[[nodiscard]] StatsStatus mvtpdf_full(ArrayRef<f64> x_col_major, usize n, usize d,
+                                      ArrayRef<f64> corr_col_major, ArrayRef<f64> df_per_row,
+                                      MutArrayRef<f64> out, Allocator* alloc = nullptr);
+
+// Multinomial PMF for `m x k` counts `x_col_major` and `mm x k` probabilities `p_col_major`
+// (`mm == 1` or `mm == m`).
+[[nodiscard]] StatsStatus mnpdf_rows(ArrayRef<f64> x_col_major, usize m, usize k,
+                                     ArrayRef<f64> p_col_major, usize mm,
+                                     MutArrayRef<f64> out) noexcept;
+
 } // namespace keel::stats

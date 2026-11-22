@@ -255,6 +255,62 @@ void test_regress_pca_lda_cluster_tests() {
     check(dw.dw > 0.0 && dw.dw < 4.0 && dw.p_both >= 0.0 && dw.p_both <= 1.0, "dwtest valid range");
 }
 
+void test_copulas_and_mvdist() {
+    namespace st = keel::stats;
+    using keel::f64;
+    // 1. Copulas
+    const f64 u[4] = {0.25, 0.75, 0.5, 0.5}; // 2 x 2 col-major: rows (0.25, 0.5), (0.75, 0.5)
+    const f64 r_id[4] = {1.0, 0.0, 0.0, 1.0};
+    const f64 r_pos[4] = {1.0, 0.5, 0.5, 1.0};
+    f64 out[2]{};
+
+    check(st::copula_pdf_gaussian(u, 2, 2, r_id, out) == st::StatsStatus::kOk, "copula gauss id");
+    check_near(out[0], 1.0, 1e-12, "copula gauss indep pdf = 1");
+    check(st::copula_cdf_gaussian_2d(u, 2, 0.0, out) == st::StatsStatus::kOk, "copula gauss cdf");
+    check_near(out[0], 0.125, 1e-10, "copula gauss indep cdf");
+    check(st::copula_cdf_gaussian_2d(u, 2, 0.5, out) == st::StatsStatus::kOk, "copula gauss corr");
+    check(out[0] > 0.125, "positive rho increases copula cdf");
+
+    check(st::copula_pdf_t(u, 2, 2, r_pos, 5.0, out) == st::StatsStatus::kOk, "copula t pdf");
+    check(out[0] > 0.0 && out[1] > 0.0, "copula t pdf positive");
+
+    check(st::copula_cdf_clayton(u, 2, 2.0, out) == st::StatsStatus::kOk, "clayton cdf");
+    check(out[0] > 0.125, "clayton positive dependence");
+    check(st::copula_pdf_clayton(u, 2, 2.0, out) == st::StatsStatus::kOk, "clayton pdf");
+    check(out[0] > 0.0, "clayton pdf > 0");
+
+    check(st::copula_cdf_frank(u, 2, 3.0, out) == st::StatsStatus::kOk, "frank cdf");
+    check(out[0] > 0.125, "frank positive dependence");
+    check(st::copula_pdf_frank(u, 2, 3.0, out) == st::StatsStatus::kOk, "frank pdf");
+    check(out[0] > 0.0, "frank pdf > 0");
+
+    check(st::copula_cdf_gumbel(u, 2, 2.0, out) == st::StatsStatus::kOk, "gumbel cdf");
+    check(out[0] > 0.125, "gumbel positive dependence");
+    check(st::copula_pdf_gumbel(u, 2, 2.0, out) == st::StatsStatus::kOk, "gumbel pdf");
+    check(out[0] > 0.0, "gumbel pdf > 0");
+
+    // 2. mvnpdf / mvtpdf / mnpdf
+    const f64 x0[4] = {0.0, 1.0, 0.0, -1.0}; // 2 x 2 col-major: (0,0), (1,-1)
+    const f64 sig[4] = {1.0, 0.0, 0.0, 1.0};
+    check(st::mvnpdf_full(x0, 2, 2, sig, out) == st::StatsStatus::kOk, "mvnpdf_full ok");
+    check_near(out[0], 1.0 / (2.0 * 3.14159265358979323846), 1e-12, "mvnpdf at 0");
+    f64 out_d[2]{};
+    const f64 dv[2] = {1.0, 1.0};
+    check(st::mvnpdf_diag(x0, 2, 2, dv, out_d) == st::StatsStatus::kOk, "mvnpdf_diag ok");
+    check_near(out[1], out_d[1], 1e-12, "mvnpdf full == diag");
+
+    const f64 df[2] = {5.0, 5.0};
+    check(st::mvtpdf_full(x0, 2, 2, r_pos, df, out) == st::StatsStatus::kOk, "mvtpdf_full ok");
+    check(out[0] > out[1] && out[1] > 0.0, "mvtpdf mode at origin");
+
+    const f64 counts[3] = {2.0, 1.0, 1.0}; // 1 x 3
+    const f64 probs[3] = {0.5, 0.25, 0.25};
+    f64 mn_out[1]{};
+    check(st::mnpdf_rows(counts, 1, 3, probs, 1, mn_out) == st::StatsStatus::kOk, "mnpdf ok");
+    // 4! / (2! 1! 1!) * 0.5^2 * 0.25 * 0.25 = 12 * 0.015625 = 0.1875
+    check_near(mn_out[0], 0.1875, 1e-12, "mnpdf exact value");
+}
+
 } // namespace
 
 int main() {
@@ -263,6 +319,7 @@ int main() {
     test_distance_and_linkage();
     test_lasso_and_anova();
     test_regress_pca_lda_cluster_tests();
+    test_copulas_and_mvdist();
     if (g_failures == 0) {
         std::printf("ALL keel::stats TESTS PASSED\n");
         return 0;
