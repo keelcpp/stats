@@ -311,6 +311,143 @@ void test_copulas_and_mvdist() {
     check_near(mn_out[0], 0.1875, 1e-12, "mnpdf exact value");
 }
 
+void test_hypothesis_and_fits() {
+    namespace st = keel::stats;
+    using keel::f64;
+    using keel::i32;
+
+    const f64 x[8] = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0};
+    const f64 y[8] = {10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0};
+
+    // 1. ttest_1sample & ttest_2sample
+    st::TTestResult tt{};
+    check(st::ttest_1sample(x, 4.5, 0.05, st::TestTail::kBoth, tt) == st::StatsStatus::kOk,
+          "ttest_1sample ok");
+    check(tt.h == 0 && std::fabs(tt.tstat) < 1e-12 && tt.p > 0.99, "ttest_1sample mean=4.5");
+
+    st::TTest2Result tt2{};
+    check(st::ttest_2sample(x, y, 0.05, st::TestTail::kBoth, true, tt2) == st::StatsStatus::kOk,
+          "ttest_2sample eq ok");
+    check(tt2.h == 1 && tt2.p < 1e-4, "ttest_2sample rejects");
+
+    // 2. ztest_1sample, vartest_1sample, vartest_2sample
+    st::ZTestResult zt{};
+    check(st::ztest_1sample(x, 4.5, 2.0, 0.05, st::TestTail::kBoth, zt) == st::StatsStatus::kOk,
+          "ztest_1sample ok");
+    check(zt.h == 0 && std::fabs(zt.zval) < 1e-12, "ztest_1sample zero z");
+
+    st::VarTestResult vt{};
+    check(st::vartest_1sample(x, 6.0, 0.05, st::TestTail::kBoth, vt) == st::StatsStatus::kOk,
+          "vartest_1sample ok");
+    check(vt.h == 0 && vt.df == 7.0, "vartest_1sample df");
+
+    st::VarTest2Result vt2{};
+    check(st::vartest_2sample(x, y, 0.05, st::TestTail::kBoth, vt2) == st::StatsStatus::kOk,
+          "vartest_2sample ok");
+    check(vt2.h == 0 && std::fabs(vt2.fstat - 1.0) < 1e-12, "vartest_2sample equal var");
+
+    // 3. kstest_1sample & kstest_2sample
+    const f64 stdnorm[10] = {-1.5, -1.0, -0.6, -0.3, -0.1, 0.1, 0.3, 0.6, 1.0, 1.5};
+    st::KsTestResult ks{};
+    check(st::kstest_1sample(stdnorm, {}, {}, 0.05, st::TestTail::kBoth, ks) ==
+              st::StatsStatus::kOk,
+          "kstest_1sample ok");
+    check(ks.h == 0 && ks.p > 0.05, "kstest_1sample accepts std normal");
+
+    st::KsTestResult ks2{};
+    check(st::kstest_2sample(x, y, 0.05, st::TestTail::kBoth, ks2) == st::StatsStatus::kOk,
+          "kstest_2sample ok");
+    check(ks2.h == 1 && ks2.ksstat == 1.0, "kstest_2sample disjoint");
+
+    // 4. jbtest
+    st::JbTestResult jb{};
+    check(st::jbtest(stdnorm, 0.05, std::numeric_limits<f64>::quiet_NaN(), jb) ==
+              st::StatsStatus::kOk,
+          "jbtest ok");
+    check(jb.h == 0 && jb.jbstat >= 0.0, "jbtest accepts normal");
+
+    // 5. signtest, fishertest, chi2gof_freq
+    st::SignTestResult sg{};
+    check(st::signtest(x, {}, 4.5, 0.05, st::TestTail::kBoth, sg) == st::StatsStatus::kOk,
+          "signtest ok");
+    check(sg.h == 0 && sg.p > 0.99, "signtest median=4.5");
+
+    st::FisherTestResult ft{};
+    check(st::fishertest(10.0, 1.0, 1.0, 10.0, 0.05, st::TestTail::kBoth, ft) ==
+              st::StatsStatus::kOk,
+          "fishertest ok");
+    check(ft.h == 1 && ft.p < 0.005 && ft.odds_ratio > 50.0, "fishertest strong association");
+
+    const f64 obs[4] = {25.0, 25.0, 25.0, 25.0};
+    const f64 exp_f[4] = {25.0, 25.0, 25.0, 25.0};
+    st::Chi2GofResult cg{};
+    check(st::chi2gof_freq(obs, exp_f, 0, 0.05, cg) == st::StatsStatus::kOk, "chi2gof ok");
+    check(cg.h == 0 && cg.chi2stat == 0.0 && cg.df == 3.0, "chi2gof exact fit");
+
+    // 6. vartestn
+    const f64 vx[8] = {1.0, 2.0, 3.0, 4.0, 11.0, 12.0, 13.0, 14.0};
+    const f64 vg[8] = {1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0};
+    st::VarTestNResult vtn{};
+    check(st::vartestn(vx, vg, st::VarTestNMethod::kBartlett, vtn) == st::StatsStatus::kOk,
+          "vartestn bartlett ok");
+    check(vtn.p > 0.99, "vartestn equal variance");
+
+    // 7. runstest, ranksum, signrank, ansaribradley, lillietest
+    const f64 runs_x[10] = {1.0, 1.0, 1.0, 1.0, 1.0, 10.0, 10.0, 10.0, 10.0, 10.0};
+    st::RunsTestResult rt{};
+    check(st::runstest(runs_x, 5.0, 0.05, st::TestTail::kBoth, true, rt) == st::StatsStatus::kOk,
+          "runstest ok");
+    check(rt.nruns == 2 && rt.h == 1, "runstest 2 runs rejects");
+
+    st::RankTestResult rs{};
+    check(st::ranksum(x, y, 0.05, st::TestTail::kBoth, 0, rs) == st::StatsStatus::kOk,
+          "ranksum ok");
+    check(rs.h == 1 && rs.p < 0.005, "ranksum disjoint");
+
+    st::RankTestResult sr{};
+    check(st::signrank(x, {}, 4.5, 0.05, st::TestTail::kBoth, 0, sr) == st::StatsStatus::kOk,
+          "signrank ok");
+    check(sr.h == 0 && sr.p > 0.9, "signrank symmetric");
+
+    st::RankTestResult ab{};
+    check(st::ansaribradley(x, x, 0.05, st::TestTail::kBoth, ab) == st::StatsStatus::kOk,
+          "ansaribradley ok");
+    check(ab.h == 0, "ansaribradley equal scale");
+
+    st::LillieTestResult lt{};
+    check(st::lillietest(stdnorm, 0.05, lt) == st::StatsStatus::kOk, "lillietest ok");
+    check(lt.h == 0 && lt.p > 0.05, "lillietest accepts normal");
+
+    // 8. Distribution MLE fitters & CIs
+    const f64 pos_data[12] = {0.8, 1.1, 1.4, 1.7, 2.0, 2.3, 2.6, 3.0, 3.5, 4.1, 4.8, 5.9};
+    st::Fit2Result f2{};
+    check(st::gamfit(pos_data, {}, {}, 0.05, true, f2) == st::StatsStatus::kOk, "gamfit ok");
+    check(f2.p1 > 0.0 && f2.p2 > 0.0 && f2.ci1_lo < f2.p1 && f2.p1 < f2.ci1_hi, "gamfit ci");
+
+    check(st::wblfit(pos_data, {}, {}, 0.05, true, f2) == st::StatsStatus::kOk, "wblfit ok");
+    check(f2.p1 > 0.0 && f2.p2 > 0.0 && f2.ci1_lo < f2.p1 && f2.p1 < f2.ci1_hi, "wblfit ci");
+
+    const f64 unit_data[10] = {0.12, 0.21, 0.30, 0.38, 0.45, 0.52, 0.61, 0.69, 0.78, 0.88};
+    check(st::betafit(unit_data, 0.05, true, f2) == st::StatsStatus::kOk, "betafit ok");
+    check(f2.p1 > 0.0 && f2.p2 > 0.0 && f2.ci1_lo < f2.p1 && f2.p1 < f2.ci1_hi, "betafit ci");
+
+    const f64 nb_data[10] = {0.0, 1.0, 2.0, 2.0, 3.0, 4.0, 5.0, 7.0, 9.0, 12.0};
+    check(st::nbinfit(nb_data, 0.05, true, f2) == st::StatsStatus::kOk, "nbinfit ok");
+    check(f2.p1 > 0.0 && f2.p2 > 0.0 && f2.p2 < 1.0, "nbinfit valid params");
+
+    const f64 ev_data[10] = {-2.1, -1.2, -0.5, 0.1, 0.6, 1.0, 1.4, 1.9, 2.3, 2.8};
+    check(st::evfit(ev_data, {}, {}, 0.05, true, f2) == st::StatsStatus::kOk, "evfit ok");
+    check(f2.p2 > 0.0 && f2.ci1_lo < f2.p1 && f2.p1 < f2.ci1_hi, "evfit ci");
+
+    const f64 gp_data[12] = {0.1, 0.25, 0.4, 0.7, 1.1, 1.6, 2.3, 3.5, 5.2, 8.1, 13.5, 22.0};
+    check(st::gpfit(gp_data, 0.05, true, f2) == st::StatsStatus::kOk, "gpfit ok");
+    check(f2.p2 > 0.0 && f2.ci2_lo < f2.p2 && f2.p2 < f2.ci2_hi, "gpfit ci");
+
+    st::Fit3Result f3{};
+    check(st::gevfit(ev_data, 0.05, true, f3) == st::StatsStatus::kOk, "gevfit ok");
+    check(f3.p2 > 0.0 && f3.ci2_lo < f3.p2 && f3.p2 < f3.ci2_hi, "gevfit ci");
+}
+
 } // namespace
 
 int main() {
@@ -320,6 +457,7 @@ int main() {
     test_lasso_and_anova();
     test_regress_pca_lda_cluster_tests();
     test_copulas_and_mvdist();
+    test_hypothesis_and_fits();
     if (g_failures == 0) {
         std::printf("ALL keel::stats TESTS PASSED\n");
         return 0;

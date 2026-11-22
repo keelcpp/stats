@@ -524,4 +524,219 @@ struct DwTestResult {
                                      ArrayRef<f64> p_col_major, usize mm,
                                      MutArrayRef<f64> out) noexcept;
 
+// ============================================================================
+// Hypothesis Tests (t, z, var, KS, JB, sign, Fisher, chi2gof, vartestn, runs, rank, Lilliefors)
+// ============================================================================
+
+enum class TestTail : u8 {
+    kBoth = 0,
+    kRight,
+    kLeft,
+};
+
+struct TTestResult {
+    i32 h = 0;
+    f64 p = 1.0;
+    f64 ci_lo = 0.0;
+    f64 ci_hi = 0.0;
+    f64 tstat = 0.0;
+    f64 df = 0.0;
+    f64 sd = 0.0;
+};
+
+struct TTest2Result {
+    i32 h = 0;
+    f64 p = 1.0;
+    f64 ci_lo = 0.0;
+    f64 ci_hi = 0.0;
+    f64 tstat = 0.0;
+    f64 df = 0.0;
+    f64 sd_x = 0.0;
+    f64 sd_y = 0.0;
+    f64 sd_pooled = 0.0;
+};
+
+struct ZTestResult {
+    i32 h = 0;
+    f64 p = 1.0;
+    f64 ci_lo = 0.0;
+    f64 ci_hi = 0.0;
+    f64 zval = 0.0;
+};
+
+struct VarTestResult {
+    i32 h = 0;
+    f64 p = 1.0;
+    f64 ci_lo = 0.0;
+    f64 ci_hi = 0.0;
+    f64 chisqstat = 0.0;
+    f64 df = 0.0;
+};
+
+struct VarTest2Result {
+    i32 h = 0;
+    f64 p = 1.0;
+    f64 ci_lo = 0.0;
+    f64 ci_hi = 0.0;
+    f64 fstat = 0.0;
+    f64 df1 = 0.0;
+    f64 df2 = 0.0;
+};
+
+struct KsTestResult {
+    i32 h = 0;
+    f64 p = 1.0;
+    f64 ksstat = 0.0;
+    f64 cv = 0.0;
+};
+
+struct JbTestResult {
+    i32 h = 0;
+    f64 p = 1.0;
+    f64 jbstat = 0.0;
+    f64 cv = 0.0;
+};
+
+struct SignTestResult {
+    f64 p = 1.0;
+    i32 h = 0;
+    i64 sign = 0;
+};
+
+struct FisherTestResult {
+    i32 h = 0;
+    f64 p = 1.0;
+    f64 odds_ratio = 0.0;
+    f64 ci_lo = 0.0;
+    f64 ci_hi = 0.0;
+};
+
+struct Chi2GofResult {
+    f64 p = 1.0;
+    i32 h = 0;
+    f64 chi2stat = 0.0;
+    f64 df = 0.0;
+};
+
+enum class VarTestNMethod : u8 {
+    kBartlett = 0,
+    kLeveneQuadratic,
+    kLeveneAbsolute,
+    kBrownForsythe,
+    kOBrien,
+};
+
+struct VarTestNResult {
+    f64 p = 0.0;
+    f64 stat = 0.0;
+    f64 df1 = 0.0;
+    f64 df2 = 0.0;
+};
+
+struct RunsTestResult {
+    f64 p = 1.0;
+    i32 h = 0;
+    i32 nruns = 0;
+    i32 n1 = 0;
+    i32 n0 = 0;
+    f64 zval = 0.0;
+};
+
+struct RankTestResult {
+    f64 p = 1.0;
+    i32 h = 0;
+    f64 stat = 0.0;
+    f64 zval = 0.0;
+};
+
+struct LillieTestResult {
+    i32 h = 0;
+    f64 p = 0.5;
+    f64 kstat = 0.0;
+    f64 cv = 0.0;
+};
+
+[[nodiscard]] StatsStatus ttest_1sample(ArrayRef<f64> x, f64 m, f64 alpha, TestTail tail,
+                                        TTestResult& out) noexcept;
+[[nodiscard]] StatsStatus ttest_2sample(ArrayRef<f64> x, ArrayRef<f64> y, f64 alpha, TestTail tail,
+                                        bool equal_var, TTest2Result& out) noexcept;
+[[nodiscard]] StatsStatus ztest_1sample(ArrayRef<f64> x, f64 m, f64 sigma, f64 alpha, TestTail tail,
+                                        ZTestResult& out) noexcept;
+[[nodiscard]] StatsStatus vartest_1sample(ArrayRef<f64> x, f64 v, f64 alpha, TestTail tail,
+                                          VarTestResult& out) noexcept;
+[[nodiscard]] StatsStatus vartest_2sample(ArrayRef<f64> x, ArrayRef<f64> y, f64 alpha,
+                                          TestTail tail, VarTest2Result& out) noexcept;
+// If `cdf_x` is empty, tests against standard normal N(0, 1).
+[[nodiscard]] StatsStatus kstest_1sample(ArrayRef<f64> x, ArrayRef<f64> cdf_x, ArrayRef<f64> cdf_f,
+                                         f64 alpha, TestTail tail, KsTestResult& out,
+                                         Allocator* alloc = nullptr);
+[[nodiscard]] StatsStatus kstest_2sample(ArrayRef<f64> x, ArrayRef<f64> y, f64 alpha, TestTail tail,
+                                         KsTestResult& out, Allocator* alloc = nullptr);
+// `mctol`: pass quiet_nan() for default (MC when n < 2000, chi2(2) asymptotic when n >= 2000).
+[[nodiscard]] StatsStatus jbtest(ArrayRef<f64> x, f64 alpha, f64 mctol, JbTestResult& out,
+                                 Allocator* alloc = nullptr);
+// Paired when `!y.empty()`; otherwise tests median against `m0`.
+[[nodiscard]] StatsStatus signtest(ArrayRef<f64> x, ArrayRef<f64> y, f64 m0, f64 alpha,
+                                   TestTail tail, SignTestResult& out) noexcept;
+[[nodiscard]] StatsStatus fishertest(f64 a, f64 b, f64 c, f64 d, f64 alpha, TestTail tail,
+                                     FisherTestResult& out, Allocator* alloc = nullptr);
+[[nodiscard]] StatsStatus chi2gof_freq(ArrayRef<f64> observed, ArrayRef<f64> expected, i32 nparams,
+                                       f64 alpha, Chi2GofResult& out) noexcept;
+[[nodiscard]] StatsStatus vartestn(ArrayRef<f64> x, ArrayRef<f64> group, VarTestNMethod method,
+                                   VarTestNResult& out, Allocator* alloc = nullptr);
+// `threshold`: pass quiet_nan() to default to median(x).
+[[nodiscard]] StatsStatus runstest(ArrayRef<f64> x, f64 threshold, f64 alpha, TestTail tail,
+                                   bool exact, RunsTestResult& out, Allocator* alloc = nullptr);
+// `method_mode`: 0 = auto, 1 = exact, 2 = approximate.
+[[nodiscard]] StatsStatus ranksum(ArrayRef<f64> x, ArrayRef<f64> y, f64 alpha, TestTail tail,
+                                  i32 method_mode, RankTestResult& out, Allocator* alloc = nullptr);
+[[nodiscard]] StatsStatus signrank(ArrayRef<f64> x, ArrayRef<f64> y, f64 m0, f64 alpha,
+                                   TestTail tail, i32 method_mode, RankTestResult& out,
+                                   Allocator* alloc = nullptr);
+[[nodiscard]] StatsStatus ansaribradley(ArrayRef<f64> x, ArrayRef<f64> y, f64 alpha, TestTail tail,
+                                        RankTestResult& out, Allocator* alloc = nullptr);
+[[nodiscard]] StatsStatus lillietest(ArrayRef<f64> x, f64 alpha, LillieTestResult& out,
+                                     Allocator* alloc = nullptr);
+
+// ============================================================================
+// Distribution MLE Fitters & Wald Confidence Intervals
+// ============================================================================
+
+struct Fit2Result {
+    f64 p1 = 0.0;
+    f64 p2 = 0.0;
+    f64 ci1_lo = 0.0;
+    f64 ci1_hi = 0.0;
+    f64 ci2_lo = 0.0;
+    f64 ci2_hi = 0.0;
+};
+
+struct Fit3Result {
+    f64 p1 = 0.0;
+    f64 p2 = 0.0;
+    f64 p3 = 0.0;
+    f64 ci1_lo = 0.0;
+    f64 ci1_hi = 0.0;
+    f64 ci2_lo = 0.0;
+    f64 ci2_hi = 0.0;
+    f64 ci3_lo = 0.0;
+    f64 ci3_hi = 0.0;
+};
+
+// `cens` and `freq` may be empty (treated as all 0 and all 1 respectively).
+[[nodiscard]] StatsStatus gamfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 alpha,
+                                 bool compute_ci, Fit2Result& out) noexcept;
+[[nodiscard]] StatsStatus wblfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 alpha,
+                                 bool compute_ci, Fit2Result& out, Allocator* alloc = nullptr);
+[[nodiscard]] StatsStatus betafit(ArrayRef<f64> x, f64 alpha, bool compute_ci,
+                                  Fit2Result& out) noexcept;
+[[nodiscard]] StatsStatus nbinfit(ArrayRef<f64> x, f64 alpha, bool compute_ci,
+                                  Fit2Result& out) noexcept;
+[[nodiscard]] StatsStatus evfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 alpha,
+                                bool compute_ci, Fit2Result& out) noexcept;
+[[nodiscard]] StatsStatus gpfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit2Result& out,
+                                Allocator* alloc = nullptr);
+[[nodiscard]] StatsStatus gevfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit3Result& out,
+                                 Allocator* alloc = nullptr);
+
 } // namespace keel::stats

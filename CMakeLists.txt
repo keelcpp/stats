@@ -69,6 +69,29 @@ if(NOT TARGET keel::linalg)
     FetchContent_MakeAvailable(keel_linalg)
 endif()
 
+if(NOT TARGET keel::random)
+    find_package(keel_random QUIET CONFIG)
+    if(TARGET keel::keel_random AND NOT TARGET keel::random)
+        add_library(keel::random ALIAS keel::keel_random)
+    endif()
+endif()
+if(NOT TARGET keel::random)
+    include(FetchContent)
+    set(KEEL_RANDOM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    if(KEEL_STATS_NO_EXCEPTIONS_RTTI)
+        set(KEEL_RANDOM_NO_EXCEPTIONS_RTTI ON CACHE BOOL "" FORCE)
+    endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../random/CMakeLists.txt" AND NOT DEFINED FETCHCONTENT_SOURCE_DIR_KEEL_RANDOM)
+        set(FETCHCONTENT_SOURCE_DIR_KEEL_RANDOM "${CMAKE_CURRENT_SOURCE_DIR}/../random" CACHE PATH "Local keel_random checkout")
+    endif()
+    FetchContent_Declare(
+        keel_random
+        GIT_REPOSITORY https://github.com/keelcpp/random.git
+        GIT_TAG        7792545ef777dc45bcdc05b0f0b90f589a9b6db7
+    )
+    FetchContent_MakeAvailable(keel_random)
+endif()
+
 add_library(keel_stats STATIC
     src/distributions.cpp
     src/descriptive.cpp
@@ -82,12 +105,14 @@ add_library(keel_stats STATIC
     src/ad_dw.cpp
     src/copulas.cpp
     src/mvdist.cpp
+    src/hypothesis.cpp
+    src/dist_fits.cpp
 )
 add_library(keel::stats ALIAS keel_stats)
 
 target_link_libraries(keel_stats
     PUBLIC keel::keel keel::specfun
-    PRIVATE keel::linalg
+    PRIVATE keel::linalg keel::random
 )
 
 target_compile_features(keel_stats PUBLIC cxx_std_20)
