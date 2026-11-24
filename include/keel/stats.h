@@ -89,6 +89,36 @@ struct Moments {
 [[nodiscard]] f64 gev_inv(f64 p, f64 k, f64 sigma = 1.0, f64 mu = 0.0) noexcept;
 [[nodiscard]] Moments gev_stat(f64 k, f64 sigma = 1.0, f64 mu = 0.0) noexcept;
 
+// Generalized Pareto GP(shape = k, scale = sigma, threshold = theta), sigma > 0
+[[nodiscard]] f64 gp_pdf(f64 x, f64 k, f64 sigma = 1.0, f64 theta = 0.0) noexcept;
+[[nodiscard]] f64 gp_cdf(f64 x, f64 k, f64 sigma = 1.0, f64 theta = 0.0) noexcept;
+[[nodiscard]] f64 gp_inv(f64 p, f64 k, f64 sigma = 1.0, f64 theta = 0.0) noexcept;
+[[nodiscard]] Moments gp_stat(f64 k, f64 sigma = 1.0, f64 theta = 0.0) noexcept;
+
+// Type-I Extreme Value (Gumbel minimum) EV(loc = mu, scale = sigma), sigma > 0
+[[nodiscard]] f64 ev_pdf(f64 x, f64 mu = 0.0, f64 sigma = 1.0) noexcept;
+[[nodiscard]] f64 ev_cdf(f64 x, f64 mu = 0.0, f64 sigma = 1.0) noexcept;
+[[nodiscard]] f64 ev_inv(f64 p, f64 mu = 0.0, f64 sigma = 1.0) noexcept;
+[[nodiscard]] Moments ev_stat(f64 mu = 0.0, f64 sigma = 1.0) noexcept;
+
+// Rician(noncentrality = s >= 0, scale = sigma > 0)
+[[nodiscard]] f64 rice_pdf(f64 x, f64 s, f64 sigma) noexcept;
+[[nodiscard]] f64 rice_cdf(f64 x, f64 s, f64 sigma) noexcept;
+[[nodiscard]] f64 rice_inv(f64 p, f64 s, f64 sigma) noexcept;
+[[nodiscard]] Moments rice_stat(f64 s, f64 sigma) noexcept;
+
+// Noncentral Chi-squared(df = k > 0, noncentrality = lambda >= 0)
+[[nodiscard]] f64 ncx2_pdf(f64 x, f64 k, f64 lambda) noexcept;
+[[nodiscard]] f64 ncx2_cdf(f64 x, f64 k, f64 lambda) noexcept;
+[[nodiscard]] f64 ncx2_inv(f64 p, f64 k, f64 lambda) noexcept;
+[[nodiscard]] Moments ncx2_stat(f64 k, f64 lambda) noexcept;
+
+// Nakagami(shape = mu > 0, scale = omega > 0)
+[[nodiscard]] f64 naka_pdf(f64 x, f64 mu, f64 omega) noexcept;
+[[nodiscard]] f64 naka_cdf(f64 x, f64 mu, f64 omega) noexcept;
+[[nodiscard]] f64 naka_inv(f64 p, f64 mu, f64 omega) noexcept;
+[[nodiscard]] Moments naka_stat(f64 mu, f64 omega) noexcept;
+
 // ============================================================================
 // Discrete Probability Distributions (PMF, CDF, ICDF, Moments)
 // ============================================================================
@@ -104,6 +134,30 @@ struct Moments {
 [[nodiscard]] f64 bino_cdf(f64 k, f64 n, f64 p) noexcept;
 [[nodiscard]] f64 bino_inv(f64 q, f64 n, f64 p) noexcept;
 [[nodiscard]] Moments bino_stat(f64 n, f64 p) noexcept;
+
+// Geometric(p) — number of failures before first success, 0 < p <= 1
+[[nodiscard]] f64 geo_pdf(f64 k, f64 p) noexcept;
+[[nodiscard]] f64 geo_cdf(f64 k, f64 p) noexcept;
+[[nodiscard]] f64 geo_inv(f64 q, f64 p) noexcept;
+[[nodiscard]] Moments geo_stat(f64 p) noexcept;
+
+// Discrete Uniform on {1, ..., n}, integer n >= 1
+[[nodiscard]] f64 unid_pdf(f64 k, f64 n) noexcept;
+[[nodiscard]] f64 unid_cdf(f64 k, f64 n) noexcept;
+[[nodiscard]] f64 unid_inv(f64 p, f64 n) noexcept;
+[[nodiscard]] Moments unid_stat(f64 n) noexcept;
+
+// Negative Binomial(r > 0, 0 < p <= 1) — failures before r successes
+[[nodiscard]] f64 nbin_pdf(f64 k, f64 r, f64 p) noexcept;
+[[nodiscard]] f64 nbin_cdf(f64 k, f64 r, f64 p) noexcept;
+[[nodiscard]] f64 nbin_inv(f64 q, f64 r, f64 p) noexcept;
+[[nodiscard]] Moments nbin_stat(f64 r, f64 p) noexcept;
+
+// Hypergeometric(population = m, successes = big_k, draws = n)
+[[nodiscard]] f64 hyge_pdf(f64 k, f64 m, f64 big_k, f64 n) noexcept;
+[[nodiscard]] f64 hyge_cdf(f64 k, f64 m, f64 big_k, f64 n) noexcept;
+[[nodiscard]] f64 hyge_inv(f64 q, f64 m, f64 big_k, f64 n) noexcept;
+[[nodiscard]] Moments hyge_stat(f64 m, f64 big_k, f64 n) noexcept;
 
 // ============================================================================
 // Descriptive Statistics & Quantiles
@@ -738,5 +792,188 @@ struct Fit3Result {
                                 Allocator* alloc = nullptr);
 [[nodiscard]] StatsStatus gevfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit3Result& out,
                                  Allocator* alloc = nullptr);
+
+struct Fit1Result {
+    f64 p1 = 0.0;
+    f64 ci_lo = 0.0;
+    f64 ci_hi = 0.0;
+};
+
+// Closed-form & censored MLE fitters (`cens` / `freq` may be empty).
+[[nodiscard]] StatsStatus normfit(ArrayRef<f64> x, ArrayRef<u8> cens, ArrayRef<f64> freq, f64 alpha,
+                                  Fit2Result& out) noexcept;
+[[nodiscard]] StatsStatus expfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 alpha,
+                                 Fit1Result& out) noexcept;
+[[nodiscard]] StatsStatus poissfit(ArrayRef<f64> x, f64 alpha, Fit1Result& out) noexcept;
+[[nodiscard]] StatsStatus unifit(ArrayRef<f64> x, f64 alpha, Fit2Result& out) noexcept;
+[[nodiscard]] StatsStatus binofit_scalar(f64 k, f64 n, f64 alpha, Fit1Result& out) noexcept;
+[[nodiscard]] StatsStatus raylfit(ArrayRef<f64> x, f64 alpha, Fit1Result& out) noexcept;
+
+// Negative log-likelihoods (`cens` / `freq` may be empty).
+[[nodiscard]] f64 normlike(f64 mu, f64 sigma, ArrayRef<f64> x, ArrayRef<f64> cens = {},
+                           ArrayRef<f64> freq = {}) noexcept;
+[[nodiscard]] f64 explike(f64 mu, ArrayRef<f64> x, ArrayRef<f64> cens = {}, ArrayRef<f64> freq = {},
+                          f64* avar_out = nullptr) noexcept;
+[[nodiscard]] f64 lognlike(f64 mu, f64 sigma, ArrayRef<f64> x, ArrayRef<f64> cens = {},
+                           ArrayRef<f64> freq = {}, f64* avar_out_2x2 = nullptr) noexcept;
+[[nodiscard]] f64 gamlike(f64 a, f64 b, ArrayRef<f64> x) noexcept;
+[[nodiscard]] f64 betalike(f64 a, f64 b, ArrayRef<f64> x) noexcept;
+[[nodiscard]] f64 wbllike(f64 scale, f64 shape, ArrayRef<f64> x, ArrayRef<f64> cens = {},
+                          ArrayRef<f64> freq = {}) noexcept;
+[[nodiscard]] f64 evlike(f64 mu, f64 sigma, ArrayRef<f64> x, ArrayRef<f64> cens = {},
+                         ArrayRef<f64> freq = {}) noexcept;
+[[nodiscard]] f64 gevlike(f64 k, f64 sigma, f64 mu, ArrayRef<f64> x) noexcept;
+[[nodiscard]] f64 gplike(f64 k, f64 sigma, ArrayRef<f64> x) noexcept;
+
+// ============================================================================
+// Multivariate CDFs & Covariance Factorization (cholcov, corrcov, mvncdf, mvtcdf)
+// ============================================================================
+
+struct CholCovResult {
+    Array<f64> t_col_major; // rows x cols (cols == n)
+    usize rows = 0;
+    usize cols = 0;
+    usize non_pd_count = 0;
+
+    explicit CholCovResult(Allocator* alloc = nullptr) : t_col_major(alloc) {}
+};
+
+// Cholesky-like factor T (T' * T == sigma) of symmetric PD or PSD matrix `sigma` (`n x n` col-major).
+// If `sigma` has negative eigenvalues beyond tol, `non_pd_count > 0` and `t_col_major` is empty.
+[[nodiscard]] StatsStatus cholcov(ArrayRef<f64> sigma_col_major, usize n, CholCovResult& out,
+                                  Allocator* alloc = nullptr);
+
+// Correlation matrix `out_r` (`n x n` col-major) and std devs `out_sigma` (length `n`) from covariance `c`.
+[[nodiscard]] StatsStatus corrcov(ArrayRef<f64> c_col_major, usize n, MutArrayRef<f64> out_r_col_major,
+                                  MutArrayRef<f64> out_sigma) noexcept;
+
+// Genz (1992) Separation-of-Variables QMC integrator for P(a <= X <= b), X ~ N(0, L*L'),
+// where `l_row_major` is `d x d` lower-triangular Cholesky factor.
+[[nodiscard]] f64 genz_sov_mvncdf(ArrayRef<f64> l_row_major, usize d, ArrayRef<f64> a, ArrayRef<f64> b,
+                                  usize max_evals = 10000, f64 tol = 1e-5, Allocator* alloc = nullptr);
+
+// Multivariate Student-t box probability P(xl <= Y <= xu), Y ~ t_df(0, corr), via antithetic MC
+// (or exact 1-D `t_cdf` when d == 1). `l_row_major` is `d x d` lower Cholesky of correlation matrix.
+[[nodiscard]] f64 mvtcdf_mc(ArrayRef<f64> l_row_major, usize d, f64 df, ArrayRef<f64> xl, ArrayRef<f64> xu,
+                            i32 n_samples, u64 seed = 0x9e3779b97f4a7c15ULL, Allocator* alloc = nullptr);
+
+// ============================================================================
+// Robust Regression/Covariance, Canonical/Partial Correlation & Multiple Comparisons
+// ============================================================================
+
+enum class RobustWeight : u8 {
+    kAndrews = 0,
+    kBisquare,
+    kCauchy,
+    kFair,
+    kHuber,
+    kLogistic,
+    kOls,
+    kTalwar,
+    kWelsch,
+};
+
+[[nodiscard]] f64 robust_default_tune(RobustWeight wt) noexcept;
+
+// IRLS robust regression `y ~ X * beta` (`x_col_major` is `n x p`, `n > p`).
+// Pass NaN for `tune` to use the weight function's default tuning constant.
+[[nodiscard]] StatsStatus robustfit(ArrayRef<f64> x_col_major, usize n, usize p, ArrayRef<f64> y,
+                                    RobustWeight weight, f64 tune, MutArrayRef<f64> out_beta, f64& out_s,
+                                    Allocator* alloc = nullptr);
+
+// Concentration-step (FAST-MCD-lite) robust covariance (`x_col_major` is `n x d`, `n > d + 1`).
+[[nodiscard]] StatsStatus robustcov(ArrayRef<f64> x_col_major, usize n, usize d,
+                                    MutArrayRef<f64> out_sigma_col_major, MutArrayRef<f64> out_mu,
+                                    Allocator* alloc = nullptr);
+
+// Partial correlation between columns of `y` (`n x py`) and `x` (`n x px`), controlling for
+// other columns of `x` plus optional `z` (`n x pz`, may be empty). Writes `py x px` col-major `out_r`.
+[[nodiscard]] StatsStatus partialcorri(ArrayRef<f64> y_col_major, usize n, usize py,
+                                       ArrayRef<f64> x_col_major, usize px, ArrayRef<f64> z_col_major,
+                                       usize pz, MutArrayRef<f64> out_r_col_major,
+                                       Allocator* alloc = nullptr);
+
+// Canonical correlation analysis between `x` (`n x p`) and `y` (`n x q`), `n >= p + q`, `k = min(p, q)`.
+// Writes `out_a` (`p x k`), `out_b` (`q x k`), `out_r` (`k`), all column-major.
+[[nodiscard]] StatsStatus canoncorr(ArrayRef<f64> x_col_major, usize n, usize p,
+                                    ArrayRef<f64> y_col_major, usize q, MutArrayRef<f64> out_a_col_major,
+                                    MutArrayRef<f64> out_b_col_major, MutArrayRef<f64> out_r,
+                                    Allocator* alloc = nullptr);
+
+// Studentized range distribution Q(k, df) CDF and inverse quantile.
+[[nodiscard]] f64 studentized_range_cdf(f64 q, usize k, f64 df) noexcept;
+[[nodiscard]] f64 studentized_range_inv(f64 p, usize k, f64 df) noexcept;
+
+enum class McCorrection : u8 {
+    kTukeyKramer = 0,
+    kBonferroni,
+    kLsd,
+};
+
+// Post-hoc pairwise multiple comparison table (`n_pairs x 6` col-major: [i, j, lo, diff, hi, p]).
+[[nodiscard]] StatsStatus multcompare(ArrayRef<f64> means, ArrayRef<f64> counts, f64 s, f64 df, f64 alpha,
+                                      McCorrection ctype, MutArrayRef<f64> out_col_major) noexcept;
+
+// ============================================================================
+// Tied Ranks, Correlation P-Values, Outlier Tests, 1-D Smoothing, QMC & K-Means
+// ============================================================================
+
+// Average midranks for length-`n` `x` (NaN -> NaN) and tie adjustment sum((t^3 - t) / 2).
+[[nodiscard]] StatsStatus tiedrank(ArrayRef<f64> x, MutArrayRef<f64> out_ranks, f64& out_tieadj,
+                                   Allocator* alloc = nullptr);
+
+enum class CorrTail : u8 {
+    kBoth = 0,
+    kRight,
+    kLeft,
+};
+
+[[nodiscard]] f64 corr_pearson_pval(CorrTail tail, f64 r, usize n) noexcept;
+[[nodiscard]] StatsStatus corr_kendall_exact_lu(f64 tau, usize n, f64& out_lower, f64& out_upper,
+                                                Allocator* alloc = nullptr);
+[[nodiscard]] f64 corr_kendall_normal_pval(CorrTail tail, f64 tau, usize n) noexcept;
+[[nodiscard]] f64 corr_spearman_no_ties_pval(CorrTail tail, f64 rho, usize n, Allocator* alloc = nullptr);
+[[nodiscard]] StatsStatus corr_spearman_exact_midrank_lu(ArrayRef<f64> xr, ArrayRef<f64> yr, f64 d_obs,
+                                                         f64& out_lower, f64& out_upper,
+                                                         Allocator* alloc = nullptr);
+
+struct OutlierBounds {
+    f64 center = 0.0;
+    f64 lo = 0.0;
+    f64 hi = 0.0;
+};
+
+// Iterative Grubbs outlier test (NaNs ignored in test, marked 0 in `out_mask`).
+[[nodiscard]] StatsStatus grubbs_outliers(ArrayRef<f64> x, f64 alpha, MutArrayRef<u8> out_mask,
+                                          OutlierBounds& out_bounds, Allocator* alloc = nullptr);
+
+// Generalized ESD outlier test (`max_outliers < 0` defaults to ceil(0.1 * N_non_nan)).
+[[nodiscard]] StatsStatus gesd_outliers(ArrayRef<f64> x, f64 alpha, i64 max_outliers,
+                                        MutArrayRef<u8> out_mask, OutlierBounds& out_bounds,
+                                        Allocator* alloc = nullptr);
+
+// 1-D strided smoothing kernels (Gaussian, Savitzky-Golay, tricube lowess/loess) and Hampel filter.
+void smooth_gaussian_strided(const f64* src, usize n, isize step, i64 kb, i64 kf, f64 sigma, bool omit_nan,
+                             f64* dst) noexcept;
+[[nodiscard]] StatsStatus smooth_sgolay_matrix(i32 frame_len, i32 deg, Array<f64>& out_b,
+                                               Allocator* alloc = nullptr);
+void smooth_sgolay_strided(const f64* src, usize n, isize step, ArrayRef<f64> b_row_major, i32 frame_len,
+                           f64* dst) noexcept;
+void smooth_local_regress_strided(const f64* src, usize n, isize step, i32 frame_len, i32 deg,
+                                  f64* dst) noexcept;
+[[nodiscard]] StatsStatus hampel_1d(ArrayRef<f64> src, i32 k, f64 nsigmas, MutArrayRef<f64> dst,
+                                    MutArrayRef<u8> mask, MutArrayRef<f64> median, MutArrayRef<f64> sigma,
+                                    Allocator* alloc = nullptr);
+
+// Halton quasi-random point net (`n x d` column-major) with optional RR2 digit scrambling.
+[[nodiscard]] StatsStatus halton_net(usize n, usize d, i64 skip, i64 leap, bool rr2_scramble,
+                                     MutArrayRef<f64> out_col_major, Allocator* alloc = nullptr);
+
+// Deterministic Lloyd k-means iteration on `n x d` row-major `x` starting from `k x d` row-major
+// `centroids` (updated in place). Writes 0-based `out_idx` (n), `out_sumd` (k), and `out_total`.
+[[nodiscard]] StatsStatus kmeans_lloyd(ArrayRef<f64> x_row_major, usize n, usize d, i32 k,
+                                       MutArrayRef<f64> centroids_row_major, i32 max_iter,
+                                       MutArrayRef<i32> out_idx, MutArrayRef<f64> out_sumd,
+                                       f64& out_total, Allocator* alloc = nullptr);
 
 } // namespace keel::stats

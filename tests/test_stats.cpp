@@ -361,7 +361,7 @@ void test_hypothesis_and_fits() {
 
     // 4. jbtest
     st::JbTestResult jb{};
-    check(st::jbtest(stdnorm, 0.05, std::numeric_limits<f64>::quiet_NaN(), jb) ==
+    check(st::jbtest(stdnorm, 0.05, keel::Limits<f64>::quiet_nan(), jb) ==
               st::StatsStatus::kOk,
           "jbtest ok");
     check(jb.h == 0 && jb.jbstat >= 0.0, "jbtest accepts normal");
@@ -448,6 +448,210 @@ void test_hypothesis_and_fits() {
     check(f3.p2 > 0.0 && f3.ci2_lo < f3.p2 && f3.p2 < f3.ci2_hi, "gevfit ci");
 }
 
+void test_extra_distributions_and_fits() {
+    namespace st = keel::stats;
+    using namespace keel;
+    // 1. Extra continuous & discrete distributions
+    check_near(st::gp_cdf(st::gp_inv(0.7, 0.25, 2.0, 1.0), 0.25, 2.0, 1.0), 0.7, 1e-12, "gp inv/cdf");
+    check(st::gp_pdf(2.5, 0.0, 2.0, 1.0) > 0.0 && st::gp_stat(0.2, 2.0, 1.0).mean > 1.0, "gp pdf/stat");
+
+    check_near(st::ev_cdf(st::ev_inv(0.6, 1.0, 2.0), 1.0, 2.0), 0.6, 1e-12, "ev inv/cdf");
+    check(st::ev_pdf(1.0, 1.0, 2.0) > 0.0 && st::ev_stat(1.0, 2.0).var > 0.0, "ev pdf/stat");
+
+    check_near(st::rice_cdf(st::rice_inv(0.5, 2.0, 1.0), 2.0, 1.0), 0.5, 1e-9, "rice inv/cdf");
+    check(st::rice_pdf(2.0, 2.0, 1.0) > 0.0 && st::rice_stat(2.0, 1.0).mean > 2.0, "rice pdf/stat");
+
+    check_near(st::ncx2_cdf(st::ncx2_inv(0.75, 4.0, 3.0), 4.0, 3.0), 0.75, 1e-9, "ncx2 inv/cdf");
+    check_near(st::ncx2_stat(4.0, 3.0).mean, 7.0, 1e-12, "ncx2 mean");
+
+    check_near(st::naka_cdf(st::naka_inv(0.5, 2.0, 3.0), 2.0, 3.0), 0.5, 1e-10, "naka inv/cdf");
+    check(st::naka_pdf(1.5, 2.0, 3.0) > 0.0 && st::naka_stat(2.0, 3.0).mean > 0.0, "naka pdf/stat");
+
+    check_near(st::geo_pdf(2.0, 0.3), 0.49 * 0.3, 1e-12, "geo pdf");
+    check(st::geo_inv(st::geo_cdf(3.0, 0.3), 0.3) == 3.0, "geo inv/cdf");
+    check_near(st::geo_stat(0.25).mean, 3.0, 1e-12, "geo mean");
+
+    check_near(st::unid_pdf(3.0, 6.0), 1.0 / 6.0, 1e-12, "unid pdf");
+    check_near(st::unid_cdf(3.0, 6.0), 0.5, 1e-12, "unid cdf");
+    check(st::unid_inv(0.5, 6.0) == 3.0, "unid inv");
+
+    check(st::nbin_pdf(2.0, 3.0, 0.4) > 0.0, "nbin pdf");
+    check(st::nbin_inv(st::nbin_cdf(4.0, 3.0, 0.4), 3.0, 0.4) == 4.0, "nbin inv/cdf");
+
+    check(st::hyge_pdf(2.0, 20.0, 7.0, 5.0) > 0.0, "hyge pdf");
+    check(st::hyge_inv(st::hyge_cdf(2.0, 20.0, 7.0, 5.0), 20.0, 7.0, 5.0) == 2.0, "hyge inv/cdf");
+
+    // 2. Fitters & likelihoods
+    const f64 xs[6] = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0};
+    st::Fit2Result f2{};
+    check(st::normfit(xs, {}, {}, 0.05, f2) == st::StatsStatus::kOk, "normfit ok");
+    check_near(f2.p1, 3.5, 1e-12, "normfit mu");
+    check(f2.ci1_lo < f2.p1 && f2.p1 < f2.ci1_hi, "normfit mu ci");
+
+    const u8 cens[6] = {0, 0, 0, 0, 1, 1};
+    check(st::normfit(xs, cens, {}, 0.05, f2) == st::StatsStatus::kOk, "normfit cens ok");
+    check(f2.p1 > 3.5, "normfit right-censored shifts mu up");
+
+    st::Fit1Result f1{};
+    check(st::expfit(xs, {}, {}, 0.05, f1) == st::StatsStatus::kOk, "expfit ok");
+    check_near(f1.p1, 3.5, 1e-12, "expfit mu");
+    check(st::poissfit(xs, 0.05, f1) == st::StatsStatus::kOk && f1.ci_lo < f1.p1, "poissfit ok");
+    check(st::unifit(xs, 0.05, f2) == st::StatsStatus::kOk && f2.p1 == 1.0 && f2.p2 == 6.0, "unifit ok");
+    check(st::binofit_scalar(5.0, 10.0, 0.05, f1) == st::StatsStatus::kOk && f1.ci_lo < 0.5 && f1.ci_hi > 0.5,
+          "binofit ok");
+    check(st::raylfit(xs, 0.05, f1) == st::StatsStatus::kOk && f1.p1 > 0.0, "raylfit ok");
+
+    f64 avar1 = 0.0;
+    f64 avar2[4] = {};
+    check(st::normlike(3.5, 1.5, xs) > 0.0, "normlike");
+    check(st::explike(3.5, xs, {}, {}, &avar1) > 0.0 && avar1 > 0.0, "explike + avar");
+    check(st::lognlike(1.0, 0.5, xs, {}, {}, avar2) > 0.0 && avar2[0] > 0.0, "lognlike + avar");
+    check(st::gamlike(2.0, 1.5, xs) > 0.0, "gamlike");
+    const f64 udata[4] = {0.2, 0.4, 0.6, 0.8};
+    check(keel::is_finite(st::betalike(2.0, 2.0, udata)), "betalike");
+    check(st::wbllike(3.0, 2.0, xs) > 0.0, "wbllike");
+    check(keel::is_finite(st::evlike(3.0, 1.5, xs)), "evlike");
+    check(keel::is_finite(st::gevlike(0.1, 1.5, 2.0, xs)), "gevlike");
+    check(keel::is_finite(st::gplike(0.2, 1.5, xs)), "gplike");
+}
+
+void test_mvdist_robust_canon_multcompare() {
+    namespace st = keel::stats;
+    using namespace keel;
+    // 1. cholcov & corrcov
+    const f64 cov[4] = {4.0, 1.2, 1.2, 9.0};
+    st::CholCovResult cc;
+    check(st::cholcov(cov, 2, cc) == st::StatsStatus::kOk && cc.non_pd_count == 0 && cc.rows == 2,
+          "cholcov PD");
+    const f64 psd[4] = {1.0, 1.0, 1.0, 1.0};
+    check(st::cholcov(psd, 2, cc) == st::StatsStatus::kOk && cc.non_pd_count == 0 && cc.rows == 1,
+          "cholcov PSD rank 1");
+
+    f64 rmat[4] = {};
+    f64 sig[2] = {};
+    check(st::corrcov(cov, 2, rmat, sig) == st::StatsStatus::kOk, "corrcov ok");
+    check_near(sig[0], 2.0, 1e-12, "corrcov sig0");
+    check_near(rmat[1], 0.2, 1e-12, "corrcov rho");
+
+    // 2. genz_sov_mvncdf & mvtcdf_mc
+    const f64 eye3[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const f64 neg_inf[3] = {-keel::Limits<f64>::infinity(), -keel::Limits<f64>::infinity(),
+                            -keel::Limits<f64>::infinity()};
+    const f64 zeros3[3] = {0.0, 0.0, 0.0};
+    const f64 p3 = st::genz_sov_mvncdf(eye3, 3, neg_inf, zeros3, 4000, 1e-4);
+    check_near(p3, 0.125, 1e-3, "genz_sov_mvncdf orthant");
+
+    const f64 eye2[4] = {1, 0, 0, 1};
+    const f64 lo2[2] = {-100.0, -100.0};
+    const f64 hi2[2] = {0.0, 0.0};
+    const f64 pt2 = st::mvtcdf_mc(eye2, 2, 10.0, lo2, hi2, 10000);
+    check_near(pt2, 0.25, 0.02, "mvtcdf_mc orthant");
+
+    // 3. robustfit & robustcov
+    const f64 xrf[16] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 4, 5, 6, 7, 8}; // 8 x 2 col-major
+    const f64 yrf[8] = {3, 5, 7, 9, 11, 13, 15, 100.0};                  // outlier at end
+    f64 beta[2] = {};
+    f64 s_rob = 0.0;
+    check(st::robustfit(xrf, 8, 2, yrf, st::RobustWeight::kBisquare,
+                        keel::Limits<f64>::quiet_nan(), beta, s_rob) == st::StatsStatus::kOk,
+          "robustfit ok");
+    check_near(beta[0], 1.0, 0.05, "robustfit intercept resists outlier");
+    check_near(beta[1], 2.0, 0.05, "robustfit slope resists outlier");
+
+    const f64 xrc[20] = {0, 1, -1, 0.5, -0.5, 0.2, -0.2, 0.1, -0.1, 50.0,
+                         0, 0.5, -0.5, 0.2, -0.2, 0.1, -0.1, 0.3, -0.3, -50.0};
+    f64 rc_sig[4] = {};
+    f64 rc_mu[2] = {};
+    check(st::robustcov(xrc, 10, 2, rc_sig, rc_mu) == st::StatsStatus::kOk, "robustcov ok");
+    check(keel::abs(rc_mu[0]) < 1.0 && keel::abs(rc_mu[1]) < 1.0, "robustcov ignores outlier");
+
+    // 4. partialcorri & canoncorr
+    const f64 xpc[12] = {1, 2, 3, 4, 5, 6, 2, 1, 4, 3, 6, 5}; // 6 x 2
+    const f64 ypc[6] = {3, 4, 7, 8, 11, 12};                   // 6 x 1
+    f64 r_pc[2] = {};
+    check(st::partialcorri(ypc, 6, 1, xpc, 2, {}, 0, r_pc) == st::StatsStatus::kOk, "partialcorri ok");
+    check(r_pc[0] > 0.9, "partialcorri strong positive");
+
+    const f64 xcc[16] = {1, 2, 3, 4, 5, 6, 7, 8, 2, 1, 5, 3, 7, 4, 8, 6}; // 8 x 2
+    const f64 ycc[16] = {2, 4, 6, 8, 10, 12, 14, 16, 1, 3, 2, 5, 4, 7, 6, 9};
+    f64 ca[4] = {}, cb[4] = {}, cr[2] = {};
+    check(st::canoncorr(xcc, 8, 2, ycc, 2, ca, cb, cr) == st::StatsStatus::kOk, "canoncorr ok");
+    check_near(cr[0], 1.0, 1e-10, "canoncorr first r=1");
+
+    // 5. studentized_range & multcompare
+    const f64 q95 = st::studentized_range_inv(0.95, 3, 12.0);
+    check_near(st::studentized_range_cdf(q95, 3, 12.0), 0.95, 1e-9, "studentized_range roundtrip");
+    const f64 means[3] = {1.0, 2.0, 10.0};
+    const f64 cnts[3] = {5.0, 5.0, 5.0};
+    f64 mc[18] = {};
+    check(st::multcompare(means, cnts, 0.5, 12.0, 0.05, st::McCorrection::kTukeyKramer, mc) ==
+              st::StatsStatus::kOk,
+          "multcompare ok");
+    check(mc[5 * 3 + 1] < 1e-4, "multcompare detects group 1 vs 3 difference");
+}
+
+void test_ranks_outliers_smoothing_qmc_kmeans() {
+    namespace st = keel::stats;
+    using namespace keel;
+    // 1. tiedrank
+    const f64 tr_in[6] = {10, 20, 30, 20, 10, 40};
+    f64 tr_out[6] = {};
+    f64 tieadj = 0.0;
+    check(st::tiedrank(tr_in, tr_out, tieadj) == st::StatsStatus::kOk, "tiedrank ok");
+    check_near(tr_out[0], 1.5, 1e-12, "tiedrank[0]");
+    check_near(tr_out[1], 3.5, 1e-12, "tiedrank[1]");
+    check_near(tieadj, 6.0, 1e-12, "tiedrank tieadj");
+
+    // 2. correlation p-values
+    check_near(st::corr_pearson_pval(st::CorrTail::kBoth, 0.0, 10), 1.0, 1e-12, "pearson p(0)=1");
+    f64 klo = 0.0, khi = 0.0;
+    check(st::corr_kendall_exact_lu(1.0, 5, klo, khi) == st::StatsStatus::kOk, "kendall exact ok");
+    check_near(klo, 1.0 / 120.0, 1e-12, "kendall exact tau=1 n=5");
+    const f64 sp_p = st::corr_spearman_no_ties_pval(st::CorrTail::kBoth, 0.9, 15);
+    check(sp_p > 0.0 && sp_p < 0.002, "spearman AS89");
+
+    // 3. grubbs & gesd outliers
+    const f64 ox[10] = {1, 2, 1.5, 1.2, 1.8, 1.4, 1.6, 1.3, 1.7, 50.0};
+    u8 omask[10] = {};
+    st::OutlierBounds ob{};
+    check(st::grubbs_outliers(ox, 0.05, omask, ob) == st::StatsStatus::kOk && omask[9] == 1 && omask[0] == 0,
+          "grubbs detects outlier");
+    check(st::gesd_outliers(ox, 0.05, -1, omask, ob) == st::StatsStatus::kOk && omask[9] == 1 && omask[0] == 0,
+          "gesd detects outlier");
+
+    // 4. smoothing & hampel
+    const f64 sig[7] = {1, 2, 3, 100, 5, 6, 7};
+    f64 dst[7] = {};
+    u8 hmask[7] = {};
+    check(st::hampel_1d(sig, 2, 3.0, dst, hmask, {}, {}) == st::StatsStatus::kOk && hmask[3] == 1,
+          "hampel_1d detects spike");
+    keel::Array<f64> sg_b;
+    check(st::smooth_sgolay_matrix(5, 2, sg_b) == st::StatsStatus::kOk, "sgolay matrix ok");
+    const f64 lin[7] = {1, 2, 3, 4, 5, 6, 7};
+    st::smooth_sgolay_strided(lin, 7, 1, sg_b.as_ref(), 5, dst);
+    check_near(dst[3], 4.0, 1e-12, "sgolay preserves linear");
+    st::smooth_local_regress_strided(lin, 7, 1, 5, 1, dst);
+    check_near(dst[3], 4.0, 1e-12, "lowess preserves linear");
+    st::smooth_gaussian_strided(lin, 7, 1, 2, 2, 1.0, false, dst);
+    check_near(dst[3], 4.0, 1e-12, "gaussian symmetric preserves linear");
+
+    // 5. halton_net
+    f64 hnet[8] = {};
+    check(st::halton_net(4, 2, 1, 0, false, hnet) == st::StatsStatus::kOk, "halton_net ok");
+    check_near(hnet[0], 0.5, 1e-12, "halton[0,0]");
+    check_near(hnet[4], 1.0 / 3.0, 1e-12, "halton[0,1]");
+
+    // 6. kmeans_lloyd
+    const f64 kmx[12] = {0, 0, 0.1, 0.1, -0.1, 0.1, 10, 10, 10.1, 9.9, 9.9, 10.1};
+    f64 kmc[4] = {0.0, 0.0, 10.0, 10.0};
+    i32 kidx[6] = {};
+    f64 ksumd[2] = {};
+    f64 ktot = 0.0;
+    check(st::kmeans_lloyd(kmx, 6, 2, 2, kmc, 50, kidx, ksumd, ktot) == st::StatsStatus::kOk,
+          "kmeans_lloyd ok");
+    check(kidx[0] == 0 && kidx[3] == 1 && ktot < 0.2, "kmeans_lloyd clusters");
+}
+
 } // namespace
 
 int main() {
@@ -458,6 +662,9 @@ int main() {
     test_regress_pca_lda_cluster_tests();
     test_copulas_and_mvdist();
     test_hypothesis_and_fits();
+    test_extra_distributions_and_fits();
+    test_mvdist_robust_canon_multcompare();
+    test_ranks_outliers_smoothing_qmc_kmeans();
     if (g_failures == 0) {
         std::printf("ALL keel::stats TESTS PASSED\n");
         return 0;

@@ -18,7 +18,7 @@ if(NOT TARGET keel::keel)
     FetchContent_Declare(
         keel
         GIT_REPOSITORY https://github.com/keelcpp/keel.git
-        GIT_TAG        869a5c07a5d77341e5f6acbac5f8e024b274ea08
+        GIT_TAG        5d80fa7d6984e7325fc8d5317c5db13830381429
     )
     FetchContent_MakeAvailable(keel)
 endif()
@@ -41,7 +41,7 @@ if(NOT TARGET keel::specfun)
     FetchContent_Declare(
         keel_specfun
         GIT_REPOSITORY https://github.com/keelcpp/specfun.git
-        GIT_TAG        04f170a4554f2e1c85504222ee56c7b53152d035
+        GIT_TAG        243bfb4da65004dc0a8bc76e20eed6f16f08d470
     )
     FetchContent_MakeAvailable(keel_specfun)
 endif()
@@ -64,7 +64,7 @@ if(NOT TARGET keel::linalg)
     FetchContent_Declare(
         keel_linalg
         GIT_REPOSITORY https://github.com/keelcpp/linalg.git
-        GIT_TAG        bfbb5449d06dae36a3bafe8f80700082d8201b01
+        GIT_TAG        33c5027db12fe6c7de73abcc8a22278694a021cb
     )
     FetchContent_MakeAvailable(keel_linalg)
 endif()
@@ -87,13 +87,14 @@ if(NOT TARGET keel::random)
     FetchContent_Declare(
         keel_random
         GIT_REPOSITORY https://github.com/keelcpp/random.git
-        GIT_TAG        7792545ef777dc45bcdc05b0f0b90f589a9b6db7
+        GIT_TAG        4d2b805928c8cb2cdf36aaf7411f8b08a816c2ab
     )
     FetchContent_MakeAvailable(keel_random)
 endif()
 
 add_library(keel_stats STATIC
     src/distributions.cpp
+    src/distributions_extra.cpp
     src/descriptive.cpp
     src/distance.cpp
     src/linkage.cpp
@@ -107,6 +108,9 @@ add_library(keel_stats STATIC
     src/mvdist.cpp
     src/hypothesis.cpp
     src/dist_fits.cpp
+    src/fit_extra.cpp
+    src/robust_canon.cpp
+    src/stats_extra.cpp
 )
 add_library(keel::stats ALIAS keel_stats)
 
