@@ -442,7 +442,7 @@ Moments geo_stat(f64 p) noexcept {
 // ============================================================================
 
 f64 unid_pdf(f64 k, f64 n) noexcept {
-    if (!(n >= 1.0) || floor(n) != n || is_nan(k)) {
+    if (!(n >= 1.0) || floor(n) != n) {
         return qnan();
     }
     if (k < 1.0 || k > n || floor(k) != k) {
