@@ -1,22 +1,21 @@
 #include <keel/stats.h>
-
-#include <cmath>
-#include <cstdio>
+#include <keel/format.h>
+#include <keel/math.h>
 
 namespace {
 
-int g_failures = 0;
+keel::i32 g_failures = 0;
 
 void check(bool cond, const char* msg) {
     if (!cond) {
-        std::fprintf(stderr, "FAIL: %s\n", msg);
+        keel::eprintln("FAIL: {}", msg);
         ++g_failures;
     }
 }
 
 void check_near(keel::f64 got, keel::f64 expected, keel::f64 tol, const char* msg) {
-    if (std::fabs(got - expected) > tol || std::isnan(got)) {
-        std::fprintf(stderr, "FAIL: %s (got %.15g, expected %.15g, tol %.3g)\n", msg, got, expected, tol);
+    if (keel::abs(got - expected) > tol || keel::is_nan(got)) {
+        keel::eprintln("FAIL: {} (got {}, expected {}, tol {})", msg, got, expected, tol);
         ++g_failures;
     }
 }
@@ -66,7 +65,7 @@ void test_discrete_and_descriptive() {
     check_near(keel::stats::var(xs, false), 2.0, 1e-15, "sample var");
     check_near(keel::stats::median(xs), 4.0, 1e-15, "median");
     check_near(keel::stats::corrcoef(xs, xs), 1.0, 1e-14, "corrcoef self");
-    check(std::isnan(keel::stats::mean({})), "empty mean is NaN");
+    check(keel::is_nan(keel::stats::mean({})), "empty mean is NaN");
 }
 
 void test_distance_and_linkage() {
@@ -323,7 +322,7 @@ void test_hypothesis_and_fits() {
     st::TTestResult tt{};
     check(st::ttest_1sample(x, 4.5, 0.05, st::TestTail::kBoth, tt) == st::StatsStatus::kOk,
           "ttest_1sample ok");
-    check(tt.h == 0 && std::fabs(tt.tstat) < 1e-12 && tt.p > 0.99, "ttest_1sample mean=4.5");
+    check(tt.h == 0 && keel::abs(tt.tstat) < 1e-12 && tt.p > 0.99, "ttest_1sample mean=4.5");
 
     st::TTest2Result tt2{};
     check(st::ttest_2sample(x, y, 0.05, st::TestTail::kBoth, true, tt2) == st::StatsStatus::kOk,
@@ -334,7 +333,7 @@ void test_hypothesis_and_fits() {
     st::ZTestResult zt{};
     check(st::ztest_1sample(x, 4.5, 2.0, 0.05, st::TestTail::kBoth, zt) == st::StatsStatus::kOk,
           "ztest_1sample ok");
-    check(zt.h == 0 && std::fabs(zt.zval) < 1e-12, "ztest_1sample zero z");
+    check(zt.h == 0 && keel::abs(zt.zval) < 1e-12, "ztest_1sample zero z");
 
     st::VarTestResult vt{};
     check(st::vartest_1sample(x, 6.0, 0.05, st::TestTail::kBoth, vt) == st::StatsStatus::kOk,
@@ -344,7 +343,7 @@ void test_hypothesis_and_fits() {
     st::VarTest2Result vt2{};
     check(st::vartest_2sample(x, y, 0.05, st::TestTail::kBoth, vt2) == st::StatsStatus::kOk,
           "vartest_2sample ok");
-    check(vt2.h == 0 && std::fabs(vt2.fstat - 1.0) < 1e-12, "vartest_2sample equal var");
+    check(vt2.h == 0 && keel::abs(vt2.fstat - 1.0) < 1e-12, "vartest_2sample equal var");
 
     // 3. kstest_1sample & kstest_2sample
     const f64 stdnorm[10] = {-1.5, -1.0, -0.6, -0.3, -0.1, 0.1, 0.3, 0.6, 1.0, 1.5};
@@ -666,9 +665,9 @@ int main() {
     test_mvdist_robust_canon_multcompare();
     test_ranks_outliers_smoothing_qmc_kmeans();
     if (g_failures == 0) {
-        std::printf("ALL keel::stats TESTS PASSED\n");
+        keel::println("ALL keel::stats TESTS PASSED");
         return 0;
     }
-    std::fprintf(stderr, "%d FAILURE(S)\n", g_failures);
+    keel::eprintln("{} FAILURE(S)", g_failures);
     return 1;
 }

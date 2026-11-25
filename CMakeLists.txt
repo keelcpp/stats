@@ -197,6 +197,14 @@ if(KEEL_STATS_BUILD_TESTS)
     else()
         target_compile_options(test_stats PRIVATE -Wall -Wextra -Wpedantic)
     endif()
+    if(COMMAND keel_enforce_guidelines)
+        keel_enforce_guidelines(test_stats
+            SCOPE ALL
+            BAN_RAW_INTS ALL
+            BAN_RAW_FLOATS ALL
+            WARNINGS OFF
+        )
+    endif()
     add_test(NAME test_stats COMMAND test_stats)
 
     set(KEEL_DEP_INC_CLEAN "")
