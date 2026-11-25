@@ -649,6 +649,20 @@ void test_ranks_outliers_smoothing_qmc_kmeans() {
     check(st::kmeans_lloyd(kmx, 6, 2, 2, kmc, 50, kidx, ksumd, ktot) == st::StatsStatus::kOk,
           "kmeans_lloyd ok");
     check(kidx[0] == 0 && kidx[3] == 1 && ktot < 0.2, "kmeans_lloyd clusters");
+
+    // 7. pdist cosine row-normalization invariance (collinear rows get uniform tie distance)
+    const f64 cos_x[12] = {100.0, 90.0, 10.0, 10.0, 90.0, 50.0,
+                           100.0, 90.0, 10.0, 20.0, 70.0, 50.0};
+    f64 cos_d[15] = {};
+    check(st::pdist(cos_x, 6, 2, st::DistanceMetric::kCosine, 2.0, {}, cos_d) == st::StatsStatus::kOk,
+          "pdist cosine ok");
+    check(cos_d[0] == cos_d[1] && cos_d[0] == cos_d[4] && cos_d[0] == cos_d[5] &&
+              cos_d[0] == cos_d[8] && cos_d[0] == cos_d[11],
+          "pdist cosine collinear pairs identical");
+    f64 cos_z[15] = {};
+    check(st::linkage(cos_d, 6, st::LinkageMethod::kWeighted, cos_z) == st::StatsStatus::kOk,
+          "linkage weighted on cosine ok");
+    check(cos_z[0] == 3.0 && cos_z[5] == 6.0, "linkage weighted first merge (3, 6)");
 }
 
 } // namespace

@@ -313,6 +313,37 @@ StatsStatus pdist(ArrayRef<f64> x_col_major, usize rows, usize cols, DistanceMet
         return StatsStatus::kOk;
     }
 
+    if (metric == DistanceMetric::kCosine) {
+        Array<f64> norm_rows(rows * cols, 0.0, scratch.allocator());
+        Array<u8> valid(rows, u8{0}, scratch.allocator());
+        for (usize i = 0; i < rows; ++i) {
+            read_row(x_col_major, rows, cols, i, xi.as_mut_ref());
+            f64 ss = 0.0;
+            for (usize k = 0; k < cols; ++k) ss += xi[k] * xi[k];
+            const f64 nrm = keel::sqrt(ss);
+            if (nrm > 0.0) {
+                valid[i] = 1u;
+                f64* dst = norm_rows.data() + i * cols;
+                for (usize k = 0; k < cols; ++k) dst[k] = xi[k] / nrm;
+            }
+        }
+        usize idx = 0u;
+        for (usize i = 0; i < rows; ++i) {
+            const f64* ui = norm_rows.data() + i * cols;
+            for (usize j = i + 1u; j < rows; ++j) {
+                if (!valid[i] || !valid[j]) {
+                    out[idx++] = Limits<f64>::quiet_nan();
+                    continue;
+                }
+                const f64* uj = norm_rows.data() + j * cols;
+                f64 dot = 0.0;
+                for (usize k = 0; k < cols; ++k) dot += ui[k] * uj[k];
+                out[idx++] = 1.0 - dot;
+            }
+        }
+        return StatsStatus::kOk;
+    }
+
     usize idx = 0u;
     for (usize i = 0; i < rows; ++i) {
         read_row(x_col_major, rows, cols, i, xi.as_mut_ref());
@@ -395,6 +426,49 @@ StatsStatus pdist2(ArrayRef<f64> x_col_major, usize mx, ArrayRef<f64> y_col_majo
             for (usize i = 0; i < mx; ++i) {
                 const ArrayRef<f64> ri(rx.data() + i * cols, cols);
                 out_col_major[j * mx + i] = correlation_distance(ri, rj);
+            }
+        }
+        return StatsStatus::kOk;
+    }
+
+    if (metric == DistanceMetric::kCosine) {
+        Array<f64> norm_x(mx * cols, 0.0, scratch.allocator());
+        Array<u8> valid_x(mx, u8{0}, scratch.allocator());
+        for (usize i = 0; i < mx; ++i) {
+            read_row(x_col_major, mx, cols, i, xi.as_mut_ref());
+            f64 ss = 0.0;
+            for (usize k = 0; k < cols; ++k) ss += xi[k] * xi[k];
+            const f64 nrm = keel::sqrt(ss);
+            if (nrm > 0.0) {
+                valid_x[i] = 1u;
+                f64* dst = norm_x.data() + i * cols;
+                for (usize k = 0; k < cols; ++k) dst[k] = xi[k] / nrm;
+            }
+        }
+        Array<f64> norm_y(my * cols, 0.0, scratch.allocator());
+        Array<u8> valid_y(my, u8{0}, scratch.allocator());
+        for (usize j = 0; j < my; ++j) {
+            read_row(y_col_major, my, cols, j, yj.as_mut_ref());
+            f64 ss = 0.0;
+            for (usize k = 0; k < cols; ++k) ss += yj[k] * yj[k];
+            const f64 nrm = keel::sqrt(ss);
+            if (nrm > 0.0) {
+                valid_y[j] = 1u;
+                f64* dst = norm_y.data() + j * cols;
+                for (usize k = 0; k < cols; ++k) dst[k] = yj[k] / nrm;
+            }
+        }
+        for (usize j = 0; j < my; ++j) {
+            const f64* uj = norm_y.data() + j * cols;
+            for (usize i = 0; i < mx; ++i) {
+                if (!valid_x[i] || !valid_y[j]) {
+                    out_col_major[j * mx + i] = Limits<f64>::quiet_nan();
+                    continue;
+                }
+                const f64* ui = norm_x.data() + i * cols;
+                f64 dot = 0.0;
+                for (usize k = 0; k < cols; ++k) dot += ui[k] * uj[k];
+                out_col_major[j * mx + i] = 1.0 - dot;
             }
         }
         return StatsStatus::kOk;
