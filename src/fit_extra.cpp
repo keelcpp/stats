@@ -695,7 +695,7 @@ f64 gevlike(f64 k, f64 sigma, f64 mu, ArrayRef<f64> x) noexcept {
         const f64 z = (x[i] - mu) / sigma;
         const f64 kz = k * z;
         if (kz <= -1.0) {
-            return pinf();
+            return qnan();
         }
         const f64 lt = log1p(kz);
         slog_t += lt;
@@ -709,17 +709,17 @@ f64 gplike(f64 k, f64 sigma, ArrayRef<f64> x) noexcept {
     if (n == 0) {
         return pinf();
     }
-    if (!(sigma > 0.0) || is_nan(k)) {
+    if (sigma == 0.0 || is_nan(sigma) || is_nan(k)) {
         return qnan();
+    }
+    if (sigma < 0.0) {
+        return -pinf();
     }
     if (k == 0.0) {
         f64 sx = 0.0;
         for (usize i = 0; i < n; ++i) {
             if (is_nan(x[i])) {
                 return qnan();
-            }
-            if (x[i] < 0.0) {
-                return pinf();
             }
             sx += x[i];
         }
@@ -729,9 +729,6 @@ f64 gplike(f64 k, f64 sigma, ArrayRef<f64> x) noexcept {
     for (usize i = 0; i < n; ++i) {
         if (is_nan(x[i])) {
             return qnan();
-        }
-        if (x[i] < 0.0) {
-            return pinf();
         }
         const f64 kz = k * x[i] / sigma;
         if (kz <= -1.0) {

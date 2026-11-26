@@ -875,7 +875,14 @@ void test_hardening_regressions() {
           "wblfit large scale no overflow");
     const f64 neg_x[2] = {-1.0, 2.0};
     check(is_nan(st::explike(2.0, neg_x)), "explike negative x -> NaN");
-    check(is_nan(st::gplike(0.2, -1.0, wbl_big)), "gplike negative sigma -> NaN");
+    check(is_inf(st::gplike(0.2, -1.0, wbl_big)) && st::gplike(0.2, -1.0, wbl_big) < 0.0,
+          "gplike negative sigma -> -Inf");
+    check(is_nan(st::gplike(0.2, 0.0, wbl_big)), "gplike zero sigma -> NaN");
+    const f64 gp_neg_ok[3] = {-1.0, 1.0, 2.0};
+    check_near(st::gplike(0.5, 1.0, gp_neg_ok), 1.21639532432449, 1e-12,
+               "gplike negative x within support");
+    const f64 gev_viol[3] = {-100.0, -1.0, 0.0};
+    check(is_nan(st::gevlike(0.5, 1.0, 0.0, gev_viol)), "gevlike support violation -> NaN");
 
     // 11. Spearman small-n tail orientation, Grubbs n<3, GESD DOF, smoothers OOB, halton_net
     const f64 sp_right = st::corr_spearman_no_ties_pval(st::CorrTail::kRight, 0.942857142857, 6);
