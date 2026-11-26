@@ -1,5 +1,6 @@
 // keelcpp/stats/src/mvdist.cpp
-// Pure zero-STL closed-form multivariate densities: mvnpdf, mvtpdf, mnpdf.
+// Pure zero-STL closed-form multivariate densities & CDFs: mvnpdf, mvtpdf, mnpdf,
+// cholcov, corrcov, genz_sov_mvncdf, mvtcdf_mc.
 
 #include "keel/stats.h"
 
@@ -17,12 +18,21 @@ namespace {
 constexpr f64 kPi = 3.14159265358979323846;
 constexpr f64 kLog2Pi = 1.8378770664093454835606594728112352;
 
+inline bool mul_overflows(usize a, usize b) noexcept {
+    return a != 0u && b > Limits<usize>::kMax / a;
+}
+
 bool psd_quad_forms(ArrayRef<f64> x0_col_major, usize n, usize d, ArrayRef<f64> sig_col_major,
                     Array<f64>& quad, f64& log_half_det, bool& degenerate, Allocator* alloc) {
     Array<f64> sym(d * d, 0.0, alloc);
     for (usize j = 0; j < d; ++j) {
         for (usize i = 0; i < d; ++i) {
-            sym[i + j * d] = 0.5 * (sig_col_major[i + j * d] + sig_col_major[j + i * d]);
+            const f64 v1 = sig_col_major[i + j * d];
+            const f64 v2 = sig_col_major[j + i * d];
+            if (!is_finite(v1) || !is_finite(v2)) {
+                return false;
+            }
+            sym[i + j * d] = 0.5 * (v1 + v2);
         }
     }
     Array<f64> evec(d * d, 0.0, alloc);
@@ -31,6 +41,9 @@ bool psd_quad_forms(ArrayRef<f64> x0_col_major, usize n, usize d, ArrayRef<f64> 
 
     f64 max_abs = 0.0;
     for (usize i = 0; i < d; ++i) {
+        if (!is_finite(eval[i])) {
+            return false;
+        }
         max_abs = max(max_abs, abs(eval[i]));
     }
     const f64 tol = as<f64>(d) * Limits<f64>::kEpsilon * max(max_abs, 1.0);
@@ -65,11 +78,36 @@ bool psd_quad_forms(ArrayRef<f64> x0_col_major, usize n, usize d, ArrayRef<f64> 
     return true;
 }
 
+Array<i32> generate_primes(usize count, Allocator* alloc) {
+    Array<i32> ps(alloc);
+    ps.reserve(count);
+    i32 cand = 2;
+    while (ps.size() < count) {
+        bool ok = true;
+        for (usize i = 0; i < ps.size(); ++i) {
+            const i32 p = ps[i];
+            if (p * p > cand) {
+                break;
+            }
+            if (cand % p == 0) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) {
+            ps.push_back(cand);
+        }
+        ++cand;
+    }
+    return ps;
+}
+
 } // namespace
 
 StatsStatus mvnpdf_full(ArrayRef<f64> x0_col_major, usize n, usize d, ArrayRef<f64> sigma_col_major,
                         MutArrayRef<f64> out, Allocator* alloc) {
-    if (d == 0 || x0_col_major.size() < n * d || sigma_col_major.size() < d * d || out.size() < n) {
+    if (d == 0 || mul_overflows(n, d) || mul_overflows(d, d) || x0_col_major.size() < n * d ||
+        sigma_col_major.size() < d * d || out.size() < n) {
         return StatsStatus::kInvalidArgument;
     }
     if (n == 0) {
@@ -98,12 +136,13 @@ StatsStatus mvnpdf_full(ArrayRef<f64> x0_col_major, usize n, usize d, ArrayRef<f
 
 StatsStatus mvnpdf_diag(ArrayRef<f64> x0_col_major, usize n, usize d, ArrayRef<f64> diag_var,
                         MutArrayRef<f64> out) noexcept {
-    if (d == 0 || x0_col_major.size() < n * d || diag_var.size() < d || out.size() < n) {
+    if (d == 0 || mul_overflows(n, d) || x0_col_major.size() < n * d || diag_var.size() < d ||
+        out.size() < n) {
         return StatsStatus::kInvalidArgument;
     }
     f64 log_half_det = 0.0;
     for (usize j = 0; j < d; ++j) {
-        if (!(diag_var[j] > 0.0)) {
+        if (!(diag_var[j] > 0.0) || !is_finite(diag_var[j])) {
             return StatsStatus::kInvalidArgument;
         }
         log_half_det += 0.5 * log(diag_var[j]);
@@ -122,8 +161,8 @@ StatsStatus mvnpdf_diag(ArrayRef<f64> x0_col_major, usize n, usize d, ArrayRef<f
 
 StatsStatus mvtpdf_full(ArrayRef<f64> x_col_major, usize n, usize d, ArrayRef<f64> corr_col_major,
                         ArrayRef<f64> df_per_row, MutArrayRef<f64> out, Allocator* alloc) {
-    if (d == 0 || x_col_major.size() < n * d || corr_col_major.size() < d * d ||
-        df_per_row.size() < n || out.size() < n) {
+    if (d == 0 || mul_overflows(n, d) || mul_overflows(d, d) || x_col_major.size() < n * d ||
+        corr_col_major.size() < d * d || df_per_row.size() < n || out.size() < n) {
         return StatsStatus::kInvalidArgument;
     }
     for (usize r = 0; r < n; ++r) {
@@ -141,7 +180,7 @@ StatsStatus mvtpdf_full(ArrayRef<f64> x_col_major, usize n, usize d, ArrayRef<f6
     bool unit_diag = true;
     for (usize i = 0; i < d; ++i) {
         const f64 diag = cm[i + i * d];
-        if (!(diag > 0.0)) {
+        if (!(diag > 0.0) || !is_finite(diag)) {
             return StatsStatus::kSingularMatrix;
         }
         sq[i] = sqrt(diag);
@@ -161,13 +200,19 @@ StatsStatus mvtpdf_full(ArrayRef<f64> x_col_major, usize n, usize d, ArrayRef<f6
     f64 log_half_det = 0.0;
     bool degenerate = false;
     if (!psd_quad_forms(x_col_major, n, d, cm.as_ref(), quad, log_half_det, degenerate,
-                        scratch.allocator())) {
+                        scratch.allocator()) ||
+        degenerate) {
         return StatsStatus::kSingularMatrix;
     }
 
     const f64 dd = as<f64>(d);
+    const f64 mvn_base = -0.5 * dd * kLog2Pi;
     for (usize r = 0; r < n; ++r) {
         const f64 nu = df_per_row[r];
+        if (is_inf(nu)) {
+            out[r] = exp(mvn_base - log_half_det - 0.5 * quad[r]);
+            continue;
+        }
         const f64 logpdf = specfun::gammaln(0.5 * (nu + dd)) - specfun::gammaln(0.5 * nu) -
                            0.5 * dd * log(nu * kPi) - log_half_det -
                            0.5 * (nu + dd) * log1p(quad[r] / nu);
@@ -178,8 +223,8 @@ StatsStatus mvtpdf_full(ArrayRef<f64> x_col_major, usize n, usize d, ArrayRef<f6
 
 StatsStatus mnpdf_rows(ArrayRef<f64> x_col_major, usize m, usize k, ArrayRef<f64> p_col_major,
                        usize mm, MutArrayRef<f64> out) noexcept {
-    if (k == 0 || (mm != 1 && mm != m) || x_col_major.size() < m * k ||
-        p_col_major.size() < mm * k || out.size() < m) {
+    if (k == 0 || (mm != 1 && mm != m) || mul_overflows(m, k) || mul_overflows(mm, k) ||
+        x_col_major.size() < m * k || p_col_major.size() < mm * k || out.size() < m) {
         return StatsStatus::kInvalidArgument;
     }
     const f64 eps_d = Limits<f64>::kEpsilon;
@@ -189,10 +234,14 @@ StatsStatus mnpdf_rows(ArrayRef<f64> x_col_major, usize m, usize k, ArrayRef<f64
         const usize pr = (mm == 1) ? 0 : r;
         f64 n_tot = 0.0;
         bool x_bad = false;
+        bool x_nan = false;
         for (usize j = 0; j < k; ++j) {
             const f64 v = x_col_major[r + j * m];
+            if (is_nan(v)) {
+                x_nan = true;
+            }
             n_tot += v;
-            if (v < 0.0 || v != round(v)) {
+            if (v < 0.0 || !is_finite(v) || v != round(v)) {
                 x_bad = true;
             }
         }
@@ -200,15 +249,15 @@ StatsStatus mnpdf_rows(ArrayRef<f64> x_col_major, usize m, usize k, ArrayRef<f64
         bool p_bad = false;
         for (usize j = 0; j < k; ++j) {
             const f64 v = p_col_major[pr + j * mm];
-            if (v < 0.0 || v > 1.0) {
+            if (!(v >= 0.0 && v <= 1.0)) {
                 p_bad = true;
             }
             p_sum += v;
         }
-        if (abs(p_sum - 1.0) > as<f64>(k) * eps_d) {
+        if (is_nan(p_sum) || abs(p_sum - 1.0) > as<f64>(k) * eps_d) {
             p_bad = true;
         }
-        const bool n_bad = (n_tot < 0.0) || (round(n_tot) != n_tot);
+        const bool n_bad = x_nan || !is_finite(n_tot) || (n_tot < 0.0) || (round(n_tot) != n_tot);
         if (p_bad || n_bad) {
             out[r] = qnan;
             continue;
@@ -235,7 +284,7 @@ StatsStatus mnpdf_rows(ArrayRef<f64> x_col_major, usize m, usize k, ArrayRef<f64
 // ============================================================================
 
 StatsStatus cholcov(ArrayRef<f64> sigma_col_major, usize n, CholCovResult& out, Allocator* alloc) {
-    if (sigma_col_major.size() < n * n) {
+    if (mul_overflows(n, n) || sigma_col_major.size() < n * n) {
         return StatsStatus::kInvalidArgument;
     }
     out.t_col_major.clear();
@@ -244,6 +293,32 @@ StatsStatus cholcov(ArrayRef<f64> sigma_col_major, usize n, CholCovResult& out, 
     out.non_pd_count = 0;
     if (n == 0) {
         return StatsStatus::kOk;
+    }
+
+    // Validate finiteness and symmetry.
+    f64 max_diag = 0.0;
+    for (usize i = 0; i < n; ++i) {
+        const f64 d = sigma_col_major[i + i * n];
+        if (!is_finite(d)) {
+            return StatsStatus::kInvalidArgument;
+        }
+        max_diag = max(max_diag, abs(d));
+    }
+    const f64 sym_tol = 10.0 * Limits<f64>::kEpsilon * max(max_diag, 1.0);
+    for (usize j = 0; j < n; ++j) {
+        for (usize i = j + 1; i < n; ++i) {
+            const f64 a = sigma_col_major[i + j * n];
+            const f64 b = sigma_col_major[j + i * n];
+            if (!is_finite(a) || !is_finite(b)) {
+                return StatsStatus::kInvalidArgument;
+            }
+            if (abs(a - b) > sym_tol * max(1.0, max(abs(a), abs(b)))) {
+                out.non_pd_count = n;
+                out.rows = 0;
+                out.cols = 0;
+                return StatsStatus::kOk;
+            }
+        }
     }
 
     // 1. Try positive-definite upper Cholesky R'*R = sigma.
@@ -312,13 +387,13 @@ StatsStatus cholcov(ArrayRef<f64> sigma_col_major, usize n, CholCovResult& out, 
 
 StatsStatus corrcov(ArrayRef<f64> c_col_major, usize n, MutArrayRef<f64> out_r_col_major,
                     MutArrayRef<f64> out_sigma) noexcept {
-    if (n == 0 || c_col_major.size() < n * n || out_r_col_major.size() < n * n ||
-        out_sigma.size() < n) {
+    if (n == 0 || mul_overflows(n, n) || c_col_major.size() < n * n ||
+        out_r_col_major.size() < n * n || out_sigma.size() < n) {
         return StatsStatus::kInvalidArgument;
     }
     for (usize i = 0; i < n; ++i) {
         const f64 v = c_col_major[i + i * n];
-        if (v < 0.0) {
+        if (!(v >= 0.0) || !is_finite(v)) {
             return StatsStatus::kInvalidArgument;
         }
         out_sigma[i] = sqrt(v);
@@ -326,8 +401,13 @@ StatsStatus corrcov(ArrayRef<f64> c_col_major, usize n, MutArrayRef<f64> out_r_c
     const f64 nanv = Limits<f64>::quiet_nan();
     for (usize j = 0; j < n; ++j) {
         for (usize i = 0; i < n; ++i) {
-            const f64 denom = out_sigma[i] * out_sigma[j];
-            out_r_col_major[i + j * n] = (denom == 0.0) ? nanv : (c_col_major[i + j * n] / denom);
+            if (i == j) {
+                out_r_col_major[i + j * n] = (out_sigma[i] > 0.0) ? 1.0 : nanv;
+            } else {
+                const f64 denom = out_sigma[i] * out_sigma[j];
+                out_r_col_major[i + j * n] =
+                    (denom == 0.0) ? nanv : (c_col_major[i + j * n] / denom);
+            }
         }
     }
     return StatsStatus::kOk;
@@ -335,9 +415,30 @@ StatsStatus corrcov(ArrayRef<f64> c_col_major, usize n, MutArrayRef<f64> out_r_c
 
 f64 genz_sov_mvncdf(ArrayRef<f64> l_row_major, usize d, ArrayRef<f64> a, ArrayRef<f64> b,
                     usize max_evals, f64 tol, Allocator* alloc) {
-    if (d == 0 || l_row_major.size() < d * d || a.size() < d || b.size() < d) {
-        return Limits<f64>::quiet_nan();
+    const f64 qnan = Limits<f64>::quiet_nan();
+    if (d == 0 || mul_overflows(d, d) || l_row_major.size() < d * d || a.size() < d ||
+        b.size() < d || !(tol >= 0.0)) {
+        return qnan;
     }
+    for (usize i = 0; i < d; ++i) {
+        if (is_nan(a[i]) || is_nan(b[i])) {
+            return qnan;
+        }
+        if (!(l_row_major[i * d + i] > 0.0) || !is_finite(l_row_major[i * d + i])) {
+            return qnan;
+        }
+        for (usize k = 0; k < i; ++k) {
+            if (!is_finite(l_row_major[i * d + k])) {
+                return qnan;
+            }
+        }
+    }
+    for (usize i = 0; i < d; ++i) {
+        if (a[i] >= b[i]) {
+            return 0.0;
+        }
+    }
+
     auto eval_phi = [](f64 x) noexcept -> f64 {
         if (is_inf(x)) {
             return (x < 0.0) ? 0.0 : 1.0;
@@ -351,15 +452,12 @@ f64 genz_sov_mvncdf(ArrayRef<f64> l_row_major, usize d, ArrayRef<f64> a, ArrayRe
         return f0;
     }
 
-    static constexpr i32 kPrimes[32] = {2,   3,   5,   7,   11,  13,  17,  19,  23,  29,  31,
-                                        37,  41,  43,  47,  53,  59,  61,  67,  71,  73,  79,
-                                        83,  89,  97,  101, 103, 107, 109, 113, 127, 131};
     ArenaTemp scratch = get_scratch(alloc);
     const usize m = d - 1;
+    const Array<i32> primes = generate_primes(m, scratch.allocator());
     Array<f64> alpha(m, 0.0, scratch.allocator());
     for (usize k = 0; k < m; ++k) {
-        const f64 pk = (k < 32) ? as<f64>(kPrimes[k]) : as<f64>(137 + 2 * k);
-        const f64 rt = sqrt(pk);
+        const f64 rt = sqrt(as<f64>(primes[k]));
         alpha[k] = rt - floor(rt);
     }
 
@@ -438,12 +536,29 @@ f64 genz_sov_mvncdf(ArrayRef<f64> l_row_major, usize d, ArrayRef<f64> a, ArrayRe
 
 f64 mvtcdf_mc(ArrayRef<f64> l_row_major, usize d, f64 df, ArrayRef<f64> xl, ArrayRef<f64> xu,
               i32 n_samples, u64 seed, Allocator* alloc) {
-    if (d == 0 || l_row_major.size() < d * d || xl.size() < d || xu.size() < d || !(df > 0.0)) {
-        return Limits<f64>::quiet_nan();
+    const f64 qnan = Limits<f64>::quiet_nan();
+    if (d == 0 || mul_overflows(d, d) || l_row_major.size() < d * d || xl.size() < d ||
+        xu.size() < d || !(df > 0.0)) {
+        return qnan;
+    }
+    for (usize i = 0; i < d; ++i) {
+        if (is_nan(xl[i]) || is_nan(xu[i])) {
+            return qnan;
+        }
+        if (!(l_row_major[i * d + i] > 0.0) || !is_finite(l_row_major[i * d + i])) {
+            return qnan;
+        }
+    }
+    for (usize i = 0; i < d; ++i) {
+        if (xl[i] >= xu[i]) {
+            return 0.0;
+        }
     }
     if (d == 1) {
-        const f64 fu = is_inf(xu[0]) ? (xu[0] > 0.0 ? 1.0 : 0.0) : t_cdf(xu[0], df);
-        const f64 fl = is_inf(xl[0]) ? (xl[0] > 0.0 ? 1.0 : 0.0) : t_cdf(xl[0], df);
+        const f64 fu =
+            is_inf(xu[0]) ? (xu[0] > 0.0 ? 1.0 : 0.0) : t_cdf(xu[0] / l_row_major[0], df);
+        const f64 fl =
+            is_inf(xl[0]) ? (xl[0] > 0.0 ? 1.0 : 0.0) : t_cdf(xl[0] / l_row_major[0], df);
         return max(0.0, fu - fl);
     }
     if (n_samples < 2) {
@@ -464,7 +579,8 @@ f64 mvtcdf_mc(ArrayRef<f64> l_row_major, usize d, f64 df, ArrayRef<f64> xl, Arra
         for (usize j = 0; j < d; ++j) {
             z[j] = random::normal_f64(gen);
         }
-        const f64 scale = sqrt(df / random::chi_squared_f64(gen, df));
+        const f64 chi2_draw = is_inf(df) ? df : max(random::chi_squared_f64(gen, df), 1e-300);
+        const f64 scale = is_inf(df) ? 1.0 : sqrt(df / chi2_draw);
         // Pass 1: +z
         bool inside = true;
         for (usize j = 0; j < d; ++j) {

@@ -7,6 +7,14 @@
 
 namespace keel::stats {
 
+namespace {
+
+inline bool mul_overflows(usize a, usize b) noexcept {
+    return a != 0u && b > Limits<usize>::kMax / a;
+}
+
+} // namespace
+
 StatsStatus anova1_grouped(ArrayRef<f64> values, ArrayRef<usize> group_offsets,
                            Anova1Result& out) noexcept {
     const f64 nan = Limits<f64>::quiet_nan();
@@ -16,15 +24,25 @@ StatsStatus anova1_grouped(ArrayRef<f64> values, ArrayRef<usize> group_offsets,
     if (group_offsets[k_groups] > values.size()) return StatsStatus::kInvalidArgument;
 
     usize n_total = 0u;
+    usize nonempty_groups = 0u;
     f64 grand_sum = 0.0;
     for (usize g = 0; g < k_groups; ++g) {
         const usize beg = group_offsets[g];
         const usize end = group_offsets[g + 1u];
-        if (end < beg) return StatsStatus::kInvalidArgument;
-        n_total += (end - beg);
-        for (usize i = beg; i < end; ++i) grand_sum += values[i];
+        if (end < beg || end > values.size()) return StatsStatus::kInvalidArgument;
+        usize ng_valid = 0u;
+        for (usize i = beg; i < end; ++i) {
+            if (!is_nan(values[i])) {
+                grand_sum += values[i];
+                ++ng_valid;
+            }
+        }
+        if (ng_valid > 0u) {
+            ++nonempty_groups;
+            n_total += ng_valid;
+        }
     }
-    if (n_total == 0u) return StatsStatus::kOk;
+    if (n_total == 0u || nonempty_groups < 2u) return StatsStatus::kOk;
     const f64 grand_mean = grand_sum / as<f64>(n_total);
 
     f64 ss_b = 0.0;
@@ -32,21 +50,28 @@ StatsStatus anova1_grouped(ArrayRef<f64> values, ArrayRef<usize> group_offsets,
     for (usize g = 0; g < k_groups; ++g) {
         const usize beg = group_offsets[g];
         const usize end = group_offsets[g + 1u];
-        const usize ng = end - beg;
-        if (ng == 0u) continue;
+        usize ng_valid = 0u;
         f64 g_sum = 0.0;
-        for (usize i = beg; i < end; ++i) g_sum += values[i];
-        const f64 g_mean = g_sum / as<f64>(ng);
-        const f64 db = g_mean - grand_mean;
-        ss_b += as<f64>(ng) * db * db;
         for (usize i = beg; i < end; ++i) {
-            const f64 dw = values[i] - g_mean;
-            ss_w += dw * dw;
+            if (!is_nan(values[i])) {
+                g_sum += values[i];
+                ++ng_valid;
+            }
+        }
+        if (ng_valid == 0u) continue;
+        const f64 g_mean = g_sum / as<f64>(ng_valid);
+        const f64 db = g_mean - grand_mean;
+        ss_b += as<f64>(ng_valid) * db * db;
+        for (usize i = beg; i < end; ++i) {
+            if (!is_nan(values[i])) {
+                const f64 dw = values[i] - g_mean;
+                ss_w += dw * dw;
+            }
         }
     }
 
-    const f64 df_b = as<f64>(k_groups - 1u);
-    const f64 df_w = as<f64>(n_total - k_groups);
+    const f64 df_b = as<f64>(nonempty_groups - 1u);
+    const f64 df_w = (n_total > nonempty_groups) ? as<f64>(n_total - nonempty_groups) : 0.0;
     out.df_between = df_b;
     out.df_within = df_w;
     out.ss_between = ss_b;
@@ -56,8 +81,13 @@ StatsStatus anova1_grouped(ArrayRef<f64> values, ArrayRef<usize> group_offsets,
     const f64 ms_b = ss_b / df_b;
     const f64 ms_w = ss_w / df_w;
     if (ms_w <= 0.0) {
-        out.p = 0.0;
-        out.f = Limits<f64>::infinity();
+        if (ms_b > 0.0) {
+            out.p = 0.0;
+            out.f = Limits<f64>::infinity();
+        } else {
+            out.p = nan;
+            out.f = nan;
+        }
         return StatsStatus::kOk;
     }
     out.f = ms_b / ms_w;
@@ -67,41 +97,45 @@ StatsStatus anova1_grouped(ArrayRef<f64> values, ArrayRef<usize> group_offsets,
 
 StatsStatus anova2(ArrayRef<f64> y_col_major, usize rows, usize cols, Anova2Result& out,
                    Allocator* alloc) {
-    if (rows < 2u || cols < 2u || y_col_major.size() < rows * cols) {
+    if (rows < 2u || cols < 2u || mul_overflows(rows, cols) || y_col_major.size() < rows * cols) {
         return StatsStatus::kInvalidArgument;
     }
 
     ArenaTemp scratch = get_scratch(alloc);
-    Array<f64> row_sum(rows, 0.0, scratch.allocator());
-    Array<f64> col_sum(cols, 0.0, scratch.allocator());
+    Array<f64> row_mean(rows, 0.0, scratch.allocator());
+    Array<f64> col_mean(cols, 0.0, scratch.allocator());
     f64 grand_sum = 0.0;
     for (usize j = 0; j < cols; ++j) {
         for (usize i = 0; i < rows; ++i) {
             const f64 v = y_col_major[i + j * rows];
-            row_sum[i] += v;
-            col_sum[j] += v;
+            row_mean[i] += v;
+            col_mean[j] += v;
             grand_sum += v;
         }
     }
     const f64 n_tot = as<f64>(rows * cols);
     const f64 grand_mean = grand_sum / n_tot;
+    for (usize i = 0; i < rows; ++i) row_mean[i] /= as<f64>(cols);
+    for (usize j = 0; j < cols; ++j) col_mean[j] /= as<f64>(rows);
 
     f64 ss_rows = 0.0;
     for (usize i = 0; i < rows; ++i) {
-        const f64 d = row_sum[i] / as<f64>(cols) - grand_mean;
+        const f64 d = row_mean[i] - grand_mean;
         ss_rows += as<f64>(cols) * d * d;
     }
     f64 ss_cols = 0.0;
     for (usize j = 0; j < cols; ++j) {
-        const f64 d = col_sum[j] / as<f64>(rows) - grand_mean;
+        const f64 d = col_mean[j] - grand_mean;
         ss_cols += as<f64>(rows) * d * d;
     }
-    f64 ss_tot = 0.0;
-    for (usize i = 0; i < rows * cols; ++i) {
-        const f64 d = y_col_major[i] - grand_mean;
-        ss_tot += d * d;
+    // Direct residual sum of squares avoids catastrophic cancellation (never negative).
+    f64 ss_err = 0.0;
+    for (usize j = 0; j < cols; ++j) {
+        for (usize i = 0; i < rows; ++i) {
+            const f64 res = y_col_major[i + j * rows] - row_mean[i] - col_mean[j] + grand_mean;
+            ss_err += res * res;
+        }
     }
-    const f64 ss_err = ss_tot - ss_rows - ss_cols;
 
     const f64 df_rows = as<f64>(rows - 1u);
     const f64 df_cols = as<f64>(cols - 1u);
@@ -115,11 +149,19 @@ StatsStatus anova2(ArrayRef<f64> y_col_major, usize rows, usize cols, Anova2Resu
     out.ss_err = ss_err;
 
     const f64 ms_err = ss_err / df_err;
-    if (ms_err <= 0.0) {
-        out.p_cols = 0.0;
-        out.p_rows = 0.0;
-        out.f_cols = Limits<f64>::infinity();
-        out.f_rows = Limits<f64>::infinity();
+    const f64 nan = Limits<f64>::quiet_nan();
+    if (!(ms_err > 0.0)) {
+        if (is_nan(ms_err)) {
+            out.f_cols = nan;
+            out.f_rows = nan;
+            out.p_cols = nan;
+            out.p_rows = nan;
+            return StatsStatus::kOk;
+        }
+        out.f_cols = (ss_cols > 0.0) ? Limits<f64>::infinity() : nan;
+        out.p_cols = (ss_cols > 0.0) ? 0.0 : nan;
+        out.f_rows = (ss_rows > 0.0) ? Limits<f64>::infinity() : nan;
+        out.p_rows = (ss_rows > 0.0) ? 0.0 : nan;
         return StatsStatus::kOk;
     }
 
@@ -136,29 +178,44 @@ StatsStatus kruskal_wallis(ArrayRef<f64> values, ArrayRef<usize> group_offsets, 
     out = {nan, nan, 0.0, 0.0};
     if (group_offsets.size() < 3u) return StatsStatus::kOk;
     const usize k_groups = group_offsets.size() - 1u;
-    const usize n = group_offsets[k_groups];
-    if (n > values.size()) return StatsStatus::kInvalidArgument;
-    if (n == 0u) return StatsStatus::kOk;
+    if (group_offsets[k_groups] > values.size()) return StatsStatus::kInvalidArgument;
 
     ArenaTemp scratch = get_scratch(alloc);
-    Array<usize> grp_of(n, 0u, scratch.allocator());
+    Array<f64> valid_vals(scratch.allocator());
+    Array<usize> grp_of(scratch.allocator());
+    valid_vals.reserve(group_offsets[k_groups]);
+    grp_of.reserve(group_offsets[k_groups]);
+
+    usize nonempty_groups = 0u;
     for (usize g = 0; g < k_groups; ++g) {
         const usize beg = group_offsets[g];
         const usize end = group_offsets[g + 1u];
-        if (end < beg) return StatsStatus::kInvalidArgument;
-        for (usize i = beg; i < end; ++i) grp_of[i] = g;
+        if (end < beg || end > values.size()) return StatsStatus::kInvalidArgument;
+        usize g_cnt = 0u;
+        for (usize i = beg; i < end; ++i) {
+            if (!is_nan(values[i])) {
+                valid_vals.push_back(values[i]);
+                grp_of.push_back(g);
+                ++g_cnt;
+            }
+        }
+        if (g_cnt > 0u) ++nonempty_groups;
     }
+    const usize n = valid_vals.size();
+    if (n == 0u || nonempty_groups < 2u) return StatsStatus::kOk;
 
     Array<usize> ord(n, 0u, scratch.allocator());
     for (usize i = 0; i < n; ++i) ord[i] = i;
-    keel::sort(ord.as_mut_ref(), [&](usize a, usize b) { return values[a] < values[b]; });
+    keel::sort(ord.as_mut_ref(), [&](usize a, usize b) noexcept {
+        return valid_vals[a] < valid_vals[b];
+    });
 
     Array<f64> ranks(n, 0.0, scratch.allocator());
     f64 tie_sum = 0.0;
     usize i = 0u;
     while (i < n) {
         usize j = i + 1u;
-        while (j < n && values[ord[j]] == values[ord[i]]) ++j;
+        while (j < n && valid_vals[ord[j]] == valid_vals[ord[i]]) ++j;
         const f64 avg = 0.5 * as<f64>(i + j + 1u);
         for (usize k = i; k < j; ++k) ranks[ord[k]] = avg;
         const usize t = j - i;
@@ -182,15 +239,21 @@ StatsStatus kruskal_wallis(ArrayRef<f64> values, ArrayRef<usize> group_offsets, 
     }
 
     const f64 nd = as<f64>(n);
-    f64 h = (12.0 / (nd * (nd + 1.0))) * sum_r2_n - 3.0 * (nd + 1.0);
-    if (tie_sum > 0.0 && nd > 1.0) {
-        h /= (1.0 - tie_sum / (nd * nd * nd - nd));
-    }
-    const f64 df = as<f64>(k_groups - 1u);
-    out.h = h;
+    const f64 df = as<f64>(nonempty_groups - 1u);
     out.df = df;
     out.sum_r2_n = sum_r2_n;
-    out.p = keel::max(0.0, 1.0 - chi2_cdf(h, df));
+    f64 h = (12.0 / (nd * (nd + 1.0))) * sum_r2_n - 3.0 * (nd + 1.0);
+    if (tie_sum > 0.0 && nd > 1.0) {
+        const f64 tie_corr = 1.0 - tie_sum / (nd * nd * nd - nd);
+        if (!(tie_corr > 0.0)) {
+            out.h = nan;
+            out.p = nan;
+            return StatsStatus::kOk;
+        }
+        h /= tie_corr;
+    }
+    out.h = max(0.0, h);
+    out.p = keel::max(0.0, 1.0 - chi2_cdf(out.h, df));
     return StatsStatus::kOk;
 }
 
@@ -199,13 +262,23 @@ StatsStatus friedman(ArrayRef<f64> x_col_major, usize rows, usize cols, i32 reps
     const f64 nan = Limits<f64>::quiet_nan();
     out = {nan, nan, 0.0};
     if (reps < 1) return StatsStatus::kInvalidArgument;
-    if (x_col_major.size() < rows * cols) return StatsStatus::kInvalidArgument;
+    if (mul_overflows(rows, cols) || x_col_major.size() < rows * cols) {
+        return StatsStatus::kInvalidArgument;
+    }
 
     const usize r_cnt = as<usize>(reps);
     if (cols < 2u || rows < 2u * r_cnt || (rows % r_cnt) != 0u) return StatsStatus::kOk;
 
     const usize n_blocks = rows / r_cnt;
+    if (mul_overflows(r_cnt, cols)) return StatsStatus::kInvalidArgument;
     const usize m = r_cnt * cols;
+
+    for (usize i = 0; i < rows * cols; ++i) {
+        if (is_nan(x_col_major[i])) {
+            out.df = as<f64>(cols - 1u);
+            return StatsStatus::kOk;
+        }
+    }
 
     ArenaTemp scratch = get_scratch(alloc);
     Array<f64> rj(cols, 0.0, scratch.allocator());
@@ -225,7 +298,9 @@ StatsStatus friedman(ArrayRef<f64> x_col_major, usize rows, usize cols, i32 reps
                 ++idx;
             }
         }
-        keel::sort(ord.as_mut_ref(), [&](usize a, usize bb) { return blk_vals[a] < blk_vals[bb]; });
+        keel::sort(ord.as_mut_ref(), [&](usize a, usize bb) noexcept {
+            return blk_vals[a] < blk_vals[bb];
+        });
         usize i = 0u;
         while (i < m) {
             usize j = i + 1u;
@@ -246,14 +321,18 @@ StatsStatus friedman(ArrayRef<f64> x_col_major, usize rows, usize cols, i32 reps
     f64 sum_rj2 = 0.0;
     for (usize c = 0; c < cols; ++c) sum_rj2 += rj[c] * rj[c];
 
+    const f64 df = kd - 1.0;
+    out.df = df;
     f64 q = (12.0 / (nd * kd * rd * rd * (md + 1.0))) * sum_rj2 - 3.0 * nd * (md + 1.0);
     const f64 c_tie = 1.0 - tie_term / (nd * md * (md * md - 1.0));
-    if (c_tie > 0.0) q /= c_tie;
-
-    const f64 df = kd - 1.0;
-    out.q = q;
-    out.df = df;
-    out.p = keel::max(0.0, 1.0 - chi2_cdf(q, df));
+    if (!(c_tie > 0.0)) {
+        out.q = nan;
+        out.p = nan;
+        return StatsStatus::kOk;
+    }
+    q /= c_tie;
+    out.q = max(0.0, q);
+    out.p = keel::max(0.0, 1.0 - chi2_cdf(out.q, df));
     return StatsStatus::kOk;
 }
 

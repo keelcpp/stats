@@ -41,15 +41,22 @@ f64 mean(ArrayRef<f64> x) noexcept {
 f64 var(ArrayRef<f64> x, bool population) noexcept {
     const usize n = x.size();
     if (n == 0) return qnan();
-    if (n == 1) return population ? 0.0 : qnan();
+    if (n == 1) {
+        if (!is_finite(x[0])) return qnan();
+        return population ? 0.0 : qnan();
+    }
     const f64 m = mean(x);
+    if (!is_finite(m)) return qnan();
     f64 ss = 0.0;
+    f64 corr = 0.0;
     for (usize i = 0; i < n; ++i) {
         const f64 d = x[i] - m;
         ss += d * d;
+        corr += d;
     }
     const f64 denom = population ? as<f64>(n) : as<f64>(n - 1);
-    return ss / denom;
+    const f64 v = (ss - (corr * corr) / as<f64>(n)) / denom;
+    return is_nan(v) ? qnan() : max(0.0, v);
 }
 
 f64 stddev(ArrayRef<f64> x, bool population) noexcept {
@@ -60,10 +67,19 @@ f64 skewness(ArrayRef<f64> x, bool bias_corrected) noexcept {
     const usize n = x.size();
     if (n == 0) return qnan();
     const f64 m = mean(x);
+    if (!is_finite(m)) return qnan();
+    f64 scale = 0.0;
+    for (usize i = 0; i < n; ++i) {
+        const f64 ad = abs(x[i] - m);
+        if (is_nan(ad)) return qnan();
+        if (ad > scale) scale = ad;
+    }
+    if (!(scale > 0.0)) return qnan();
+    const f64 inv_s = 1.0 / scale;
     f64 m2 = 0.0;
     f64 m3 = 0.0;
     for (usize i = 0; i < n; ++i) {
-        const f64 d = x[i] - m;
+        const f64 d = (x[i] - m) * inv_s;
         const f64 d2 = d * d;
         m2 += d2;
         m3 += d2 * d;
@@ -71,8 +87,8 @@ f64 skewness(ArrayRef<f64> x, bool bias_corrected) noexcept {
     const f64 nf = as<f64>(n);
     m2 /= nf;
     m3 /= nf;
-    if (m2 == 0.0) return qnan();
-    const f64 g1 = m3 / pow(m2, 1.5);
+    if (!(m2 > 0.0)) return qnan();
+    const f64 g1 = m3 / (m2 * sqrt(m2));
     if (!bias_corrected) return g1;
     if (n < 3) return qnan();
     return g1 * sqrt(nf * (nf - 1.0)) / (nf - 2.0);
@@ -82,10 +98,19 @@ f64 kurtosis(ArrayRef<f64> x, bool bias_corrected) noexcept {
     const usize n = x.size();
     if (n == 0) return qnan();
     const f64 m = mean(x);
+    if (!is_finite(m)) return qnan();
+    f64 scale = 0.0;
+    for (usize i = 0; i < n; ++i) {
+        const f64 ad = abs(x[i] - m);
+        if (is_nan(ad)) return qnan();
+        if (ad > scale) scale = ad;
+    }
+    if (!(scale > 0.0)) return qnan();
+    const f64 inv_s = 1.0 / scale;
     f64 m2 = 0.0;
     f64 m4 = 0.0;
     for (usize i = 0; i < n; ++i) {
-        const f64 d = x[i] - m;
+        const f64 d = (x[i] - m) * inv_s;
         const f64 d2 = d * d;
         m2 += d2;
         m4 += d2 * d2;
@@ -93,7 +118,7 @@ f64 kurtosis(ArrayRef<f64> x, bool bias_corrected) noexcept {
     const f64 nf = as<f64>(n);
     m2 /= nf;
     m4 /= nf;
-    if (m2 == 0.0) return qnan();
+    if (!(m2 > 0.0)) return qnan();
     const f64 k = m4 / (m2 * m2);
     if (!bias_corrected) return k;
     if (n < 4) return qnan();
@@ -103,9 +128,13 @@ f64 kurtosis(ArrayRef<f64> x, bool bias_corrected) noexcept {
 f64 cov(ArrayRef<f64> x, ArrayRef<f64> y, bool population) noexcept {
     const usize n = x.size();
     if (n == 0 || y.size() != n) return qnan();
-    if (n == 1) return population ? 0.0 : qnan();
+    if (n == 1) {
+        if (!is_finite(x[0]) || !is_finite(y[0])) return qnan();
+        return population ? 0.0 : qnan();
+    }
     const f64 mx = mean(x);
     const f64 my = mean(y);
+    if (!is_finite(mx) || !is_finite(my)) return qnan();
     f64 s = 0.0;
     for (usize i = 0; i < n; ++i) s += (x[i] - mx) * (y[i] - my);
     return s / as<f64>(population ? n : (n - 1));
@@ -116,18 +145,32 @@ f64 corrcoef(ArrayRef<f64> x, ArrayRef<f64> y) noexcept {
     if (n < 2 || y.size() != n) return qnan();
     const f64 mx = mean(x);
     const f64 my = mean(y);
+    if (!is_finite(mx) || !is_finite(my)) return qnan();
+    f64 sx = 0.0;
+    f64 sy = 0.0;
+    for (usize i = 0; i < n; ++i) {
+        const f64 adx = abs(x[i] - mx);
+        const f64 ady = abs(y[i] - my);
+        if (is_nan(adx) || is_nan(ady)) return qnan();
+        if (adx > sx) sx = adx;
+        if (ady > sy) sy = ady;
+    }
+    if (!(sx > 0.0) || !(sy > 0.0)) return qnan();
+    const f64 inv_x = 1.0 / sx;
+    const f64 inv_y = 1.0 / sy;
     f64 sxx = 0.0;
     f64 syy = 0.0;
     f64 sxy = 0.0;
     for (usize i = 0; i < n; ++i) {
-        const f64 dx = x[i] - mx;
-        const f64 dy = y[i] - my;
+        const f64 dx = (x[i] - mx) * inv_x;
+        const f64 dy = (y[i] - my) * inv_y;
         sxx += dx * dx;
         syy += dy * dy;
         sxy += dx * dy;
     }
-    if (sxx <= 0.0 || syy <= 0.0) return qnan();
-    return sxy / sqrt(sxx * syy);
+    const f64 denom = sqrt(sxx) * sqrt(syy);
+    if (!(denom > 0.0)) return qnan();
+    return clamp(sxy / denom, -1.0, 1.0);
 }
 
 f64 quantile(ArrayRef<f64> x, f64 p, Allocator* alloc) {

@@ -19,18 +19,16 @@ constexpr f64 kPi = 3.14159265358979323846;
 constexpr f64 kEulerGamma = 0.57721566490153286;
 
 f64 digamma_local(f64 x) noexcept {
-    f64 s = 0.0;
-    while (x < 6.0) {
-        s -= 1.0 / x;
-        x += 1.0;
+    if (!(x > 0.0) || !is_finite(x)) {
+        return Limits<f64>::quiet_nan();
     }
-    const f64 x2 = 1.0 / (x * x);
-    f64 r = log(x) - 0.5 / x;
-    r -= x2 * (1.0 / 12.0 - x2 * (1.0 / 120.0 - x2 * (1.0 / 252.0)));
-    return r + s;
+    return specfun::psi(x);
 }
 
 f64 trigamma_local(f64 x) noexcept {
+    if (!(x > 0.0) || !is_finite(x)) {
+        return Limits<f64>::quiet_nan();
+    }
     f64 s = 0.0;
     while (x < 6.0) {
         s += 1.0 / (x * x);
@@ -85,7 +83,7 @@ void wald_ci_from_hessian_2d(f64 t1, f64 t2, f64 h11, f64 h22, f64 h12, CiTransf
                              CiTransform tr2, f64 alpha, Fit2Result& out) noexcept {
     const f64 qnan = Limits<f64>::quiet_nan();
     const f64 det = h11 * h22 - h12 * h12;
-    if (abs(det) < 1e-300 || h11 < 0.0 || h22 < 0.0) {
+    if (!(det > 1e-300) || !(h11 > 0.0) || !(h22 > 0.0)) {
         out.ci1_lo = qnan;
         out.ci1_hi = qnan;
         out.ci2_lo = qnan;
@@ -149,7 +147,7 @@ f64 nll_gam_full(f64 a, f64 b, ArrayRef<f64> xv, ArrayRef<f64> cens, ArrayRef<f6
         lxw += f * u * log(xv[i]);
         sxw += f * u * xv[i];
         if (c > 0.5 && f > 0.0) {
-            const f64 q = 1.0 - specfun::gammainc(xv[i] / b, a);
+            const f64 q = specfun::gammainc_upper(xv[i] / b, a);
             if (!(q > 0.0)) {
                 return Limits<f64>::infinity();
             }
@@ -164,19 +162,22 @@ f64 nll_wbl_simple(f64 a, f64 b, ArrayRef<f64> xv) noexcept {
         return Limits<f64>::infinity();
     }
     const f64 dn = as<f64>(xv.size());
+    const f64 la = log(a);
     f64 slx = 0.0;
     f64 sw = 0.0;
     for (usize i = 0; i < xv.size(); ++i) {
-        slx += log(xv[i]);
-        sw += pow(xv[i] / a, b);
+        const f64 lxi = log(xv[i]);
+        slx += lxi;
+        sw += exp(b * (lxi - la));
     }
-    return -dn * log(b) + dn * b * log(a) - (b - 1.0) * slx + sw;
+    return -dn * log(b) + dn * b * la - (b - 1.0) * slx + sw;
 }
 
 f64 nll_wbl_full(f64 a, f64 b, ArrayRef<f64> xv, ArrayRef<f64> cens, ArrayRef<f64> freq) noexcept {
     if (!(a > 0.0) || !(b > 0.0)) {
         return Limits<f64>::infinity();
     }
+    const f64 la = log(a);
     f64 nuw = 0.0;
     f64 lxw = 0.0;
     f64 sum_w = 0.0;
@@ -184,11 +185,12 @@ f64 nll_wbl_full(f64 a, f64 b, ArrayRef<f64> xv, ArrayRef<f64> cens, ArrayRef<f6
         const f64 f = freq.empty() ? 1.0 : freq[i];
         const f64 c = cens.empty() ? 0.0 : (cens[i] != 0.0 ? 1.0 : 0.0);
         const f64 u = 1.0 - c;
+        const f64 lxi = log(xv[i]);
         nuw += f * u;
-        lxw += f * u * log(xv[i]);
-        sum_w += f * pow(xv[i] / a, b);
+        lxw += f * u * lxi;
+        sum_w += f * exp(b * (lxi - la));
     }
-    return nuw * (-log(b) + b * log(a)) - (b - 1.0) * lxw + sum_w;
+    return nuw * (-log(b) + b * la) - (b - 1.0) * lxw + sum_w;
 }
 
 f64 nll_ev_full(f64 mu, f64 sigma, ArrayRef<f64> xv, ArrayRef<f64> cens,
@@ -264,11 +266,11 @@ f64 nll_gev(f64 k, f64 sigma, f64 mu, ArrayRef<f64> xv) noexcept {
         }
     } else {
         for (usize i = 0; i < n; ++i) {
-            const f64 t = 1.0 + k * (xv[i] - mu) / sigma;
-            if (!(t > 0.0)) {
+            const f64 kz = k * (xv[i] - mu) / sigma;
+            if (!(kz > -1.0)) {
                 return Limits<f64>::infinity();
             }
-            const f64 log_t = log(t);
+            const f64 log_t = log1p(kz);
             const f64 t_pow = exp(-log_t / k);
             nll += (1.0 + 1.0 / k) * log_t + t_pow;
         }
@@ -281,7 +283,7 @@ f64 nll_gev(f64 k, f64 sigma, f64 mu, ArrayRef<f64> xv) noexcept {
 StatsStatus gamfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 alpha,
                    bool compute_ci, Fit2Result& out) noexcept {
     const usize n = x.size();
-    if (n < 2) {
+    if (n < 2 || (compute_ci && !(alpha > 0.0 && alpha < 1.0))) {
         return StatsStatus::kInvalidArgument;
     }
     if ((!cens.empty() && cens.size() != n) || (!freq.empty() && freq.size() != n)) {
@@ -290,14 +292,14 @@ StatsStatus gamfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 
     bool has_cens = false;
     bool freq_trivial = true;
     for (usize i = 0; i < n; ++i) {
-        if (!(x[i] > 0.0)) {
+        if (!(x[i] > 0.0) || !is_finite(x[i])) {
             return StatsStatus::kInvalidArgument;
         }
         if (!cens.empty() && cens[i] != 0.0) {
             has_cens = true;
         }
         if (!freq.empty()) {
-            if (!(freq[i] >= 0.0)) {
+            if (!(freq[i] >= 0.0) || !is_finite(freq[i])) {
                 return StatsStatus::kInvalidArgument;
             }
             if (freq[i] != 1.0) {
@@ -320,12 +322,15 @@ StatsStatus gamfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 
         const f64 s = log(mu) - mean_log;
         if (!(s > 0.0)) {
             a = Limits<f64>::infinity();
-            b = mu;
+            b = 0.0;
         } else {
             a = (3.0 - s + sqrt((s - 3.0) * (s - 3.0) + 24.0 * s)) / (12.0 * s);
             for (i32 it = 0; it < 50; ++it) {
                 const f64 fa = log(a) - digamma_local(a) - s;
                 const f64 fpa = 1.0 / a - trigamma_local(a);
+                if (!(abs(fpa) > 1e-300)) {
+                    break;
+                }
                 const f64 step = fa / fpa;
                 const f64 new_a = a - step;
                 a = (new_a > 0.0) ? new_a : (a * 0.5);
@@ -366,7 +371,7 @@ StatsStatus gamfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 
             const f64 hb = max(abs(b), 1.0) * 1e-5;
             const f64 ga = (nll(a + ha, b) - nll(a - ha, b)) / (2.0 * ha);
             const f64 gb = (nll(a, b + hb) - nll(a, b - hb)) / (2.0 * hb);
-            if (sqrt(ga * ga + gb * gb) < 1e-12) {
+            if (!is_finite(ga) || !is_finite(gb) || sqrt(ga * ga + gb * gb) < 1e-12) {
                 break;
             }
             const f64 haa = (nll(a + ha, b) - 2.0 * f_cur + nll(a - ha, b)) / (ha * ha);
@@ -375,11 +380,16 @@ StatsStatus gamfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 
                              nll(a - ha, b - hb)) /
                             (4.0 * ha * hb);
             const f64 det = haa * hbb - hab * hab;
-            if (abs(det) < 1e-300) {
-                break;
+            f64 da = -ga;
+            f64 db = -gb;
+            if (haa > 0.0 && det > 1e-300) {
+                const f64 nda = (-ga * hbb + gb * hab) / det;
+                const f64 ndb = (-gb * haa + ga * hab) / det;
+                if (nda * ga + ndb * gb < 0.0) {
+                    da = nda;
+                    db = ndb;
+                }
             }
-            const f64 da = (-ga * hbb + gb * hab) / det;
-            const f64 db = (-gb * haa + ga * hab) / det;
             f64 sc = 1.0;
             bool ok = false;
             for (i32 bt = 0; bt < 30; ++bt) {
@@ -423,7 +433,7 @@ StatsStatus gamfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 
 StatsStatus wblfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 alpha,
                    bool compute_ci, Fit2Result& out, Allocator* alloc) {
     const usize n = x.size();
-    if (n < 2) {
+    if (n < 2 || (compute_ci && !(alpha > 0.0 && alpha < 1.0))) {
         return StatsStatus::kInvalidArgument;
     }
     if ((!cens.empty() && cens.size() != n) || (!freq.empty() && freq.size() != n)) {
@@ -432,14 +442,14 @@ StatsStatus wblfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 
     bool has_cens = false;
     bool freq_trivial = true;
     for (usize i = 0; i < n; ++i) {
-        if (!(x[i] > 0.0)) {
+        if (!(x[i] > 0.0) || !is_finite(x[i])) {
             return StatsStatus::kInvalidArgument;
         }
         if (!cens.empty() && cens[i] != 0.0) {
             has_cens = true;
         }
         if (!freq.empty()) {
-            if (!(freq[i] >= 0.0)) {
+            if (!(freq[i] >= 0.0) || !is_finite(freq[i])) {
                 return StatsStatus::kInvalidArgument;
             }
             if (freq[i] != 1.0) {
@@ -454,9 +464,13 @@ StatsStatus wblfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 
         ArenaTemp scratch = get_scratch(alloc);
         Array<f64> lx(n, 0.0, scratch.allocator());
         f64 sum_log = 0.0;
+        f64 lx_max = -Limits<f64>::infinity();
         for (usize i = 0; i < n; ++i) {
             lx[i] = log(x[i]);
             sum_log += lx[i];
+            if (lx[i] > lx_max) {
+                lx_max = lx[i];
+            }
         }
         const f64 mean_log = sum_log / as<f64>(n);
         f64 v2 = 0.0;
@@ -465,24 +479,32 @@ StatsStatus wblfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 
             v2 += d * d;
         }
         const f64 sd_log = sqrt(v2 / as<f64>(n));
-        b = kPi / (sd_log * sqrt(6.0) + 1e-12);
+        if (!(sd_log > 0.0)) {
+            return StatsStatus::kSingularMatrix;
+        }
+        b = kPi / (sd_log * sqrt(6.0));
         if (!(b > 0.1) || !is_finite(b)) {
             b = 1.0;
         }
+        // Shift log(x[i]) by lx_max so exp(b * (lx[i] - lx_max)) <= 1 and never overflows!
         for (i32 it = 0; it < 100; ++it) {
             f64 s0 = 0.0;
             f64 s1 = 0.0;
             f64 s2 = 0.0;
             for (usize i = 0; i < n; ++i) {
-                const f64 w = pow(x[i], b);
+                const f64 d = lx[i] - lx_max;
+                const f64 w = exp(b * d);
                 s0 += w;
-                s1 += w * lx[i];
-                s2 += w * lx[i] * lx[i];
+                s1 += w * d;
+                s2 += w * d * d;
             }
             const f64 r_val = s1 / s0;
-            const f64 g = 1.0 / b + mean_log - r_val;
+            const f64 g = 1.0 / b + (mean_log - lx_max) - r_val;
             const f64 dr = (s2 * s0 - s1 * s1) / (s0 * s0);
             const f64 dg = -1.0 / (b * b) - dr;
+            if (!(abs(dg) > 1e-300)) {
+                break;
+            }
             const f64 step = g / dg;
             const f64 new_b = b - step;
             b = (new_b > 0.0) ? new_b : (b * 0.5);
@@ -492,27 +514,37 @@ StatsStatus wblfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 
         }
         f64 s_pow = 0.0;
         for (usize i = 0; i < n; ++i) {
-            s_pow += pow(x[i], b);
+            s_pow += exp(b * (lx[i] - lx_max));
         }
-        a = pow(s_pow / as<f64>(n), 1.0 / b);
+        a = exp(lx_max + log(s_pow / as<f64>(n)) / b);
     } else {
+        ArenaTemp scratch = get_scratch(alloc);
+        Array<f64> lx(n, 0.0, scratch.allocator());
+        f64 lx_max = -Limits<f64>::infinity();
         f64 nuw_init = 0.0;
         f64 sum_lx = 0.0;
         for (usize i = 0; i < n; ++i) {
+            lx[i] = log(x[i]);
+            if (lx[i] > lx_max) {
+                lx_max = lx[i];
+            }
             const f64 f = freq.empty() ? 1.0 : freq[i];
             const f64 u = (cens.empty() || cens[i] == 0.0) ? 1.0 : 0.0;
             nuw_init += f * u;
-            sum_lx += f * u * log(x[i]);
+            sum_lx += f * u * lx[i];
         }
-        const f64 mean_log = (nuw_init > 0.0) ? (sum_lx / nuw_init) : 0.0;
+        if (!(nuw_init > 0.0)) {
+            return StatsStatus::kInvalidArgument;
+        }
+        const f64 mean_log = sum_lx / nuw_init;
         f64 v2 = 0.0;
         for (usize i = 0; i < n; ++i) {
             const f64 f = freq.empty() ? 1.0 : freq[i];
             const f64 u = (cens.empty() || cens[i] == 0.0) ? 1.0 : 0.0;
-            const f64 d = log(x[i]) - mean_log;
+            const f64 d = lx[i] - mean_log;
             v2 += f * u * d * d;
         }
-        const f64 sd_log = (nuw_init > 0.0) ? sqrt(v2 / nuw_init) : 1.0;
+        const f64 sd_log = sqrt(v2 / nuw_init);
         f64 bcur = kPi / (sd_log * sqrt(6.0) + 1e-12);
         if (!(bcur > 0.05) || !is_finite(bcur)) {
             bcur = 1.0;
@@ -523,13 +555,13 @@ StatsStatus wblfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 
             for (usize i = 0; i < n; ++i) {
                 const f64 f = freq.empty() ? 1.0 : freq[i];
                 const f64 u = (cens.empty() || cens[i] == 0.0) ? 1.0 : 0.0;
-                s += f * pow(x[i], bv);
+                s += f * exp(bv * (lx[i] - lx_max));
                 u_sum += f * u;
             }
-            if (!(u_sum > 0.0)) {
+            if (!(u_sum > 0.0) || !(s > 0.0)) {
                 return Limits<f64>::quiet_nan();
             }
-            return pow(s / u_sum, 1.0 / bv);
+            return exp(lx_max + log(s / u_sum) / bv);
         };
         auto nll_at_b = [&](f64 bv) noexcept -> f64 {
             return nll_wbl_full(profile_a(bv), bv, x, cens, freq);
@@ -539,10 +571,10 @@ StatsStatus wblfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 
             const f64 h = max(abs(bcur), 1.0) * 1e-6;
             const f64 g = (nll_at_b(bcur + h) - nll_at_b(bcur - h)) / (2.0 * h);
             const f64 hh = (nll_at_b(bcur + h) - 2.0 * f_cur + nll_at_b(bcur - h)) / (h * h);
-            if (abs(hh) < 1e-300) {
+            if (!is_finite(g) || !is_finite(hh) || abs(hh) < 1e-300) {
                 break;
             }
-            const f64 step = g / hh;
+            const f64 step = (hh > 0.0) ? (g / hh) : g;
             f64 sc = 1.0;
             bool ok = false;
             for (i32 bt = 0; bt < 30; ++bt) {
@@ -585,7 +617,7 @@ StatsStatus wblfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 
 
 StatsStatus betafit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit2Result& out) noexcept {
     const usize n = x.size();
-    if (n < 2) {
+    if (n < 2 || (compute_ci && !(alpha > 0.0 && alpha < 1.0))) {
         return StatsStatus::kInvalidArgument;
     }
     f64 sum_x = 0.0;
@@ -598,7 +630,7 @@ StatsStatus betafit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit2Result& out
         }
         sum_x += v;
         sum_log_x += log(v);
-        sum_log_1mx += log(1.0 - v);
+        sum_log_1mx += log1p(-v);
     }
     const f64 dn = as<f64>(n);
     const f64 mean_x = sum_x / dn;
@@ -608,7 +640,10 @@ StatsStatus betafit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit2Result& out
         v0 += d * d;
     }
     v0 /= dn;
-    if (!(v0 > 0.0) || v0 >= mean_x * (1.0 - mean_x)) {
+    if (!(v0 > 0.0)) {
+        return StatsStatus::kSingularMatrix;
+    }
+    if (v0 >= mean_x * (1.0 - mean_x)) {
         v0 = mean_x * (1.0 - mean_x) * 0.5;
     }
     const f64 common = mean_x * (1.0 - mean_x) / v0 - 1.0;
@@ -628,14 +663,21 @@ StatsStatus betafit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit2Result& out
         const f64 j22 = trigamma_local(b) - tab;
         const f64 j12 = -tab;
         const f64 det = j11 * j22 - j12 * j12;
-        if (abs(det) < 1e-300) {
+        if (!(abs(det) > 1e-300)) {
             break;
         }
         const f64 da = (j22 * f1 - j12 * f2) / det;
         const f64 db = (j11 * f2 - j12 * f1) / det;
-        a = (a - da > 0.0) ? (a - da) : (a * 0.5);
-        b = (b - db > 0.0) ? (b - db) : (b * 0.5);
-        if (abs(da) + abs(db) < 1e-10 * (abs(a) + abs(b) + 1.0)) {
+        f64 step = 1.0;
+        while (step > 1e-12 && (a - step * da <= 0.0 || b - step * db <= 0.0)) {
+            step *= 0.5;
+        }
+        if (a - step * da <= 0.0 || b - step * db <= 0.0) {
+            break;
+        }
+        a -= step * da;
+        b -= step * db;
+        if (abs(step * da) + abs(step * db) < 1e-10 * (abs(a) + abs(b) + 1.0)) {
             break;
         }
     }
@@ -654,13 +696,13 @@ StatsStatus betafit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit2Result& out
 
 StatsStatus nbinfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit2Result& out) noexcept {
     const usize n = x.size();
-    if (n < 2) {
+    if (n < 2 || (compute_ci && !(alpha > 0.0 && alpha < 1.0))) {
         return StatsStatus::kInvalidArgument;
     }
     f64 sum = 0.0;
     for (usize i = 0; i < n; ++i) {
         const f64 v = x[i];
-        if (v < 0.0 || abs(v - round(v)) > 1e-9) {
+        if (!(v >= 0.0) || !is_finite(v) || abs(v - round(v)) > 1e-9) {
             return StatsStatus::kInvalidArgument;
         }
         sum += v;
@@ -691,7 +733,7 @@ StatsStatus nbinfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit2Result& out
         }
         const f64 f_val = s1 + dn * log(frac);
         const f64 fp = s2 + dn * mean_x / (r * (r + mean_x));
-        if (abs(fp) < 1e-300) {
+        if (!(abs(fp) > 1e-300)) {
             break;
         }
         const f64 step = f_val / fp;
@@ -720,7 +762,7 @@ StatsStatus nbinfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit2Result& out
 StatsStatus evfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 alpha,
                   bool compute_ci, Fit2Result& out) noexcept {
     const usize n = x.size();
-    if (n < 2) {
+    if (n < 2 || (compute_ci && !(alpha > 0.0 && alpha < 1.0))) {
         return StatsStatus::kInvalidArgument;
     }
     if ((!cens.empty() && cens.size() != n) || (!freq.empty() && freq.size() != n)) {
@@ -730,13 +772,12 @@ StatsStatus evfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 a
     f64 sum_fw = 0.0;
     f64 sum_uw = 0.0;
     f64 sum_uwx = 0.0;
-    f64 sum_uwxx = 0.0;
     for (usize i = 0; i < n; ++i) {
         if (!is_finite(x[i])) {
             return StatsStatus::kInvalidArgument;
         }
         const f64 f = freq.empty() ? 1.0 : freq[i];
-        if (!(f >= 0.0)) {
+        if (!(f >= 0.0) || !is_finite(f)) {
             return StatsStatus::kInvalidArgument;
         }
         if (f != 1.0) {
@@ -746,7 +787,6 @@ StatsStatus evfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 a
         sum_fw += f;
         sum_uw += f * u;
         sum_uwx += f * u * x[i];
-        sum_uwxx += f * u * x[i] * x[i];
     }
     if (sum_uw < 2.0) {
         return StatsStatus::kInvalidArgument;
@@ -754,7 +794,14 @@ StatsStatus evfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 a
 
     const bool has_cens = (sum_uw < sum_fw);
     const f64 mean_uw = sum_uwx / sum_uw;
-    f64 var_uw = sum_uwxx / sum_uw - mean_uw * mean_uw;
+    f64 var_uw = 0.0;
+    for (usize i = 0; i < n; ++i) {
+        const f64 f = freq.empty() ? 1.0 : freq[i];
+        const f64 u = (cens.empty() || cens[i] == 0.0) ? 1.0 : 0.0;
+        const f64 d = x[i] - mean_uw;
+        var_uw += f * u * d * d;
+    }
+    var_uw /= sum_uw;
     if (!(var_uw > 0.0)) {
         if (!has_cens && freq_trivial) {
             return StatsStatus::kSingularMatrix;
@@ -781,15 +828,19 @@ StatsStatus evfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 a
         for (i32 it = 0; it < 100; ++it) {
             f64 t_sum = 0.0;
             f64 u_sum = 0.0;
-            f64 v_sum = 0.0;
             for (usize i = 0; i < n; ++i) {
                 const f64 e = exp((x[i] - x_max) / sigma);
                 t_sum += e;
-                u_sum += x[i] * e;
-                v_sum += x[i] * x[i] * e;
+                u_sum += (x[i] - x_max) * e;
             }
-            const f64 mean_w = u_sum / t_sum;
-            const f64 var_w = v_sum / t_sum - mean_w * mean_w;
+            const f64 mean_w = x_max + u_sum / t_sum;
+            f64 var_w = 0.0;
+            for (usize i = 0; i < n; ++i) {
+                const f64 e = exp((x[i] - x_max) / sigma);
+                const f64 d = x[i] - mean_w;
+                var_w += d * d * e;
+            }
+            var_w /= t_sum;
             const f64 f_val = mean_w - mean_v - sigma;
             const f64 fp = -var_w / (sigma * sigma) - 1.0;
             if (!(abs(fp) > 1e-300)) {
@@ -819,7 +870,7 @@ StatsStatus evfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 a
         for (i32 it = 0; it < 100; ++it) {
             f64 gm = 0.0, gs = 0.0;
             grad(mu, sigma, gm, gs);
-            if (sqrt(gm * gm + gs * gs) < 1e-12) {
+            if (!is_finite(gm) || !is_finite(gs) || sqrt(gm * gm + gs * gs) < 1e-12) {
                 break;
             }
             const f64 hm = max(abs(mu), 1.0) * 1e-5;
@@ -834,11 +885,16 @@ StatsStatus evfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 a
             const f64 hss = (gs_sp - gs_sm) / (2.0 * hs);
             const f64 hms = 0.5 * ((gm_sp - gm_sm) / (2.0 * hs) + (gs_mp - gs_mm) / (2.0 * hm));
             const f64 det = hmm * hss - hms * hms;
-            if (abs(det) < 1e-300) {
-                break;
+            f64 dm = -gm;
+            f64 ds = -gs;
+            if (hmm > 0.0 && det > 1e-300) {
+                const f64 ndm = (-gm * hss + gs * hms) / det;
+                const f64 nds = (-gs * hmm + gm * hms) / det;
+                if (ndm * gm + nds * gs < 0.0) {
+                    dm = ndm;
+                    ds = nds;
+                }
             }
-            const f64 dm = (-gm * hss + gs * hms) / det;
-            const f64 ds = (-gs * hmm + gm * hms) / det;
             f64 step = 1.0;
             bool ok = false;
             for (i32 bt = 0; bt < 30; ++bt) {
@@ -875,7 +931,7 @@ StatsStatus evfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 a
 
 StatsStatus gpfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit2Result& out, Allocator* alloc) {
     const usize n = x.size();
-    if (n < 2) {
+    if (n < 2 || (compute_ci && !(alpha > 0.0 && alpha < 1.0))) {
         return StatsStatus::kInvalidArgument;
     }
     for (usize i = 0; i < n; ++i) {
@@ -893,6 +949,9 @@ StatsStatus gpfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit2Result& out, 
     }
     const f64 dn = as<f64>(n);
     const f64 beta0 = sum_x / dn;
+    if (!(beta0 > 0.0)) {
+        return StatsStatus::kSingularMatrix;
+    }
     f64 beta1 = 0.0;
     for (usize i = 0; i < n; ++i) {
         const f64 f_pos = (as<f64>(i + 1) - 0.35) / dn;
@@ -923,7 +982,7 @@ StatsStatus gpfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit2Result& out, 
     for (i32 it = 0; it < 100; ++it) {
         f64 gk = 0.0, gs = 0.0;
         gp_nll_grad(k_hat, sigma_hat, x, gk, gs);
-        if (sqrt(gk * gk + gs * gs) < 1e-12) {
+        if (!is_finite(gk) || !is_finite(gs) || sqrt(gk * gk + gs * gs) < 1e-12) {
             break;
         }
         const f64 hk = max(abs(k_hat), 1.0) * 1e-6;
@@ -938,11 +997,16 @@ StatsStatus gpfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit2Result& out, 
         const f64 hss = (gs_sp - gs_sm) / (2.0 * hs);
         const f64 hks = 0.5 * ((gk_sp - gk_sm) / (2.0 * hs) + (gs_kp - gs_km) / (2.0 * hk));
         const f64 det = hkk * hss - hks * hks;
-        if (abs(det) < 1e-300) {
-            break;
+        f64 dk = -gk;
+        f64 ds = -gs;
+        if (hkk > 0.0 && det > 1e-300) {
+            const f64 ndk = (-gk * hss + gs * hks) / det;
+            const f64 nds = (-gs * hkk + gk * hks) / det;
+            if (ndk * gk + nds * gs < 0.0) {
+                dk = ndk;
+                ds = nds;
+            }
         }
-        const f64 dk = (-gk * hss + gs * hks) / det;
-        const f64 ds = (-gs * hkk + gk * hks) / det;
         f64 step = 1.0;
         bool improved = false;
         for (i32 bt = 0; bt < 30; ++bt) {
@@ -978,7 +1042,7 @@ StatsStatus gpfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit2Result& out, 
 
 StatsStatus gevfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit3Result& out, Allocator* alloc) {
     const usize n = x.size();
-    if (n < 3) {
+    if (n < 3 || (compute_ci && !(alpha > 0.0 && alpha < 1.0))) {
         return StatsStatus::kInvalidArgument;
     }
     for (usize i = 0; i < n; ++i) {
@@ -1004,14 +1068,24 @@ StatsStatus gevfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit3Result& out,
     b1 /= dn;
     b2 /= dn;
 
+    f64 sample_var = 0.0;
+    for (usize i = 0; i < n; ++i) {
+        const f64 d = xs[i] - b0;
+        sample_var += d * d;
+    }
+    const f64 sample_sd = sqrt(sample_var / (dn - 1.0));
+    if (!(sample_sd > 0.0)) {
+        return StatsStatus::kSingularMatrix;
+    }
+
     constexpr f64 kLn2Ln3 = 0.6309297535714574;
     const f64 denom = 3.0 * b2 - b0;
     f64 k_init = 0.0;
     if (abs(denom) > 1e-300) {
         const f64 c = (2.0 * b1 - b0) / denom - kLn2Ln3;
-        k_init = 7.8590 * c + 2.9554 * c * c;
+        k_init = clamp(7.8590 * c + 2.9554 * c * c, -0.45, 0.45);
     }
-    f64 sigma_init = 1.0;
+    f64 sigma_init = sample_sd * sqrt(6.0) / kPi;
     if (abs(k_init) < 1e-6) {
         sigma_init = (2.0 * b1 - b0) / log(2.0);
     } else {
@@ -1020,7 +1094,7 @@ StatsStatus gevfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit3Result& out,
         sigma_init = k_init * (2.0 * b1 - b0) / (gam_1pk * one_m_2nk);
     }
     if (!(sigma_init > 0.0) || !is_finite(sigma_init)) {
-        sigma_init = max(b0 * 0.5, 1.0);
+        sigma_init = sample_sd * sqrt(6.0) / kPi;
     }
     f64 mu_init = 0.0;
     if (abs(k_init) < 1e-6) {
@@ -1046,7 +1120,7 @@ StatsStatus gevfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit3Result& out,
 
     if (!feasible(k_init, sigma_init, mu_init)) {
         k_init = 0.0;
-        sigma_init = sqrt(6.0) / kPi;
+        sigma_init = sample_sd * sqrt(6.0) / kPi;
         mu_init = b0 - kEulerGamma * sigma_init;
     }
 
@@ -1056,8 +1130,8 @@ StatsStatus gevfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit3Result& out,
     f64 f_cur = nll_gev(k, sigma, mu, x);
     if (!is_finite(f_cur)) {
         k = 0.0;
-        sigma = 1.0;
-        mu = 0.0;
+        sigma = sample_sd * sqrt(6.0) / kPi;
+        mu = b0 - kEulerGamma * sigma;
         f_cur = nll_gev(k, sigma, mu, x);
     }
 
@@ -1069,7 +1143,8 @@ StatsStatus gevfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit3Result& out,
         const f64 gk = (nll(k + hk, sigma, mu) - nll(k - hk, sigma, mu)) / (2.0 * hk);
         const f64 gs = (nll(k, sigma + hs, mu) - nll(k, sigma - hs, mu)) / (2.0 * hs);
         const f64 gm = (nll(k, sigma, mu + hm) - nll(k, sigma, mu - hm)) / (2.0 * hm);
-        if (sqrt(gk * gk + gs * gs + gm * gm) < 1e-12) {
+        if (!is_finite(gk) || !is_finite(gs) || !is_finite(gm) ||
+            sqrt(gk * gk + gs * gs + gm * gm) < 1e-12) {
             break;
         }
         const f64 hkk = (nll(k + hk, sigma, mu) - 2.0 * f_cur + nll(k - hk, sigma, mu)) / (hk * hk);
@@ -1086,21 +1161,29 @@ StatsStatus gevfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit3Result& out,
                         (4.0 * hs * hm);
         const f64 det = hkk * (hss * hmm - hsm * hsm) - hks * (hks * hmm - hsm * hkm) +
                         hkm * (hks * hsm - hss * hkm);
-        if (abs(det) < 1e-300) {
-            break;
+        f64 dk = -gk;
+        f64 ds = -gs;
+        f64 dm = -gm;
+        if (abs(det) > 1e-300) {
+            const f64 b1n = -gk;
+            const f64 b2n = -gs;
+            const f64 b3n = -gm;
+            const f64 ndk = (b1n * (hss * hmm - hsm * hsm) - hks * (b2n * hmm - hsm * b3n) +
+                             hkm * (b2n * hsm - hss * b3n)) /
+                            det;
+            const f64 nds = (hkk * (b2n * hmm - hsm * b3n) - b1n * (hks * hmm - hsm * hkm) +
+                             hkm * (hks * b3n - b2n * hkm)) /
+                            det;
+            const f64 ndm = (hkk * (hss * b3n - b2n * hsm) - hks * (hks * b3n - b2n * hkm) +
+                             b1n * (hks * hsm - hss * hkm)) /
+                            det;
+            if (is_finite(ndk) && is_finite(nds) && is_finite(ndm) &&
+                ndk * gk + nds * gs + ndm * gm < 0.0) {
+                dk = ndk;
+                ds = nds;
+                dm = ndm;
+            }
         }
-        const f64 b1n = -gk;
-        const f64 b2n = -gs;
-        const f64 b3n = -gm;
-        const f64 dk = (b1n * (hss * hmm - hsm * hsm) - hks * (b2n * hmm - hsm * b3n) +
-                        hkm * (b2n * hsm - hss * b3n)) /
-                       det;
-        const f64 ds = (hkk * (b2n * hmm - hsm * b3n) - b1n * (hks * hmm - hsm * hkm) +
-                        hkm * (hks * b3n - b2n * hkm)) /
-                       det;
-        const f64 dm = (hkk * (hss * b3n - b2n * hsm) - hks * (hks * b3n - b2n * hkm) +
-                        b1n * (hks * hsm - hss * hkm)) /
-                       det;
         f64 sc = 1.0;
         bool ok = false;
         for (i32 bt = 0; bt < 30; ++bt) {
@@ -1150,7 +1233,7 @@ StatsStatus gevfit(ArrayRef<f64> x, f64 alpha, bool compute_ci, Fit3Result& out,
                         (4.0 * hs * hm);
         const f64 det = hkk * (hss * hmm - hsm * hsm) - hks * (hks * hmm - hsm * hkm) +
                         hkm * (hks * hsm - hss * hkm);
-        if (abs(det) < 1e-300) {
+        if (!(det > 1e-300)) {
             out.ci1_lo = out.ci1_hi = out.ci2_lo = out.ci2_hi = out.ci3_lo = out.ci3_hi = qnan;
             return StatsStatus::kOk;
         }

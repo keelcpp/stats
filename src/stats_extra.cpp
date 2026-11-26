@@ -214,7 +214,7 @@ f64 corr_pearson_pval(CorrTail tail, f64 r, usize n) noexcept {
         }
     }
     const f64 df = as<f64>(n) - 2.0;
-    const f64 t = r * sqrt(df / (1.0 - r * r));
+    const f64 t = r * sqrt(df / ((1.0 - r) * (1.0 + r)));
     switch (tail) {
     case CorrTail::kBoth:
         return min(1.0, 2.0 * t_cdf(-abs(t), df));
@@ -228,13 +228,14 @@ f64 corr_pearson_pval(CorrTail tail, f64 r, usize n) noexcept {
 
 StatsStatus corr_kendall_exact_lu(f64 tau, usize n, f64& out_lower, f64& out_upper,
                                   Allocator* alloc) {
-    if (n < 2 || is_nan(tau)) {
+    if (n < 2 || !is_finite(tau)) {
         out_lower = qnan();
         out_upper = qnan();
         return StatsStatus::kInvalidArgument;
     }
+    const f64 tau_c = clamp(tau, -1.0, 1.0);
     const usize d_max = n * (n - 1) / 2;
-    i64 d_obs = round_i64(as<f64>(d_max) * (1.0 - tau) * 0.5);
+    i64 d_obs = round_i64(as<f64>(d_max) * (1.0 - tau_c) * 0.5);
     if (d_obs < 0) {
         d_obs = 0;
     }
@@ -298,10 +299,11 @@ f64 corr_spearman_no_ties_pval(CorrTail tail, f64 rho, usize n, Allocator* alloc
     if (n < 2 || is_nan(rho)) {
         return qnan();
     }
+    const f64 rho_c = clamp(rho, -1.0, 1.0);
     const f64 nd = as<f64>(n);
     if (n < 10) {
         const f64 scale = nd * (nd * nd - 1.0) / 6.0;
-        i64 d_obs = round_i64((1.0 - rho) * scale);
+        i64 d_obs = round_i64((1.0 - rho_c) * scale);
         if (d_obs < 0) {
             d_obs = 0;
         }
@@ -327,12 +329,14 @@ f64 corr_spearman_no_ties_pval(CorrTail tail, f64 rho, usize n, Allocator* alloc
             }
             ++total;
         } while (next_permutation(perm.begin(), perm.end()));
-        return rank_tail_from_lu(tail, as<f64>(le_cnt) / as<f64>(total),
-                                 as<f64>(ge_cnt) / as<f64>(total));
+        // D is inversely related to rho: D >= d_obs <=> R <= rho (left tail),
+        // and D <= d_obs <=> R >= rho (right tail).
+        return rank_tail_from_lu(tail, as<f64>(ge_cnt) / as<f64>(total),
+                                 as<f64>(le_cnt) / as<f64>(total));
     }
     const f64 n3c = (nd + 1.0) * nd * (nd - 1.0) / 3.0;
     const f64 scale = 0.5 * n3c;
-    const f64 d_stat = scale - as<f64>(round_i64(rho * scale));
+    const f64 d_stat = scale - as<f64>(round_i64(rho_c * scale));
     switch (tail) {
     case CorrTail::kBoth:
         return min(1.0, 2.0 * as89_upper(max(d_stat, n3c - d_stat), n, n3c));
@@ -386,7 +390,7 @@ StatsStatus corr_spearman_exact_midrank_lu(ArrayRef<f64> xr, ArrayRef<f64> yr, f
 StatsStatus grubbs_outliers(ArrayRef<f64> x, f64 alpha, MutArrayRef<u8> out_mask,
                             OutlierBounds& out_bounds, Allocator* alloc) {
     const usize n = x.size();
-    if (out_mask.size() < n) {
+    if (out_mask.size() < n || !(alpha > 0.0 && alpha < 1.0)) {
         return StatsStatus::kInvalidArgument;
     }
     for (usize i = 0; i < n; ++i) {
@@ -402,7 +406,7 @@ StatsStatus grubbs_outliers(ArrayRef<f64> x, f64 alpha, MutArrayRef<u8> out_mask
             v.push_back(x[i]);
         }
     }
-    if (v.empty()) {
+    if (v.size() < 3) {
         return StatsStatus::kOk;
     }
 
@@ -456,7 +460,7 @@ StatsStatus grubbs_outliers(ArrayRef<f64> x, f64 alpha, MutArrayRef<u8> out_mask
 StatsStatus gesd_outliers(ArrayRef<f64> x, f64 alpha, i64 max_outliers, MutArrayRef<u8> out_mask,
                           OutlierBounds& out_bounds, Allocator* alloc) {
     const usize n = x.size();
-    if (out_mask.size() < n) {
+    if (out_mask.size() < n || !(alpha > 0.0 && alpha < 1.0)) {
         return StatsStatus::kInvalidArgument;
     }
     for (usize i = 0; i < n; ++i) {
@@ -473,12 +477,13 @@ StatsStatus gesd_outliers(ArrayRef<f64> x, f64 alpha, i64 max_outliers, MutArray
         }
     }
     const usize nv = v.size();
-    if (nv < 2) {
+    if (nv < 3) {
         return StatsStatus::kOk;
     }
     const usize maxo =
         (max_outliers >= 0) ? as<usize>(max_outliers) : as<usize>(ceil(0.1 * as<f64>(nv)));
-    const usize rounds = min(nv, maxo);
+    // Rosner's GESD requires at least 3 observations in the final test (dof = m - 2 >= 1).
+    const usize rounds = min(nv - 2, maxo);
     if (rounds == 0) {
         return StatsStatus::kOk;
     }
@@ -511,9 +516,10 @@ StatsStatus gesd_outliers(ArrayRef<f64> x, f64 alpha, i64 max_outliers, MutArray
                 jmax = j;
             }
         }
-        rstat[it] = (astd[it] > 0.0) ? (amax / astd[it]) : pinf();
+        rstat[it] = (astd[it] > 0.0) ? (amax / astd[it]) : ((amax > 0.0) ? pinf() : 0.0);
         v.remove_at(jmax);
-        const f64 dof = as<f64>(nv) - as<f64>(it) - 1.0;
+        // Rosner (1983): p = 1 - alpha / (2*(n - i + 1)), df = n - i - 1 = nm1 - 2.
+        const f64 dof = nm1 - 2.0;
         const f64 pp = 1.0 - alpha / (2.0 * nm1);
         const f64 t = t_inv(pp, dof);
         lam[it] = (nm1 - 1.0) * t / sqrt((dof + t * t) * nm1);
@@ -568,12 +574,19 @@ StatsStatus smooth_sgolay_matrix(i32 frame_len, i32 deg, Array<f64>& out_b, Allo
     const i32 p1 = deg + 1;
     const i32 m = (frame_len - 1) / 2;
     ArenaTemp scratch = get_scratch(alloc);
+    auto ipow = [](f64 base, i32 exp_n) noexcept -> f64 {
+        f64 res = 1.0;
+        for (i32 e = 0; e < exp_n; ++e) {
+            res *= base;
+        }
+        return res;
+    };
     Array<f64> ata(as<usize>(p1) * as<usize>(p1), 0.0, scratch.allocator());
     for (i32 a = 0; a < p1; ++a) {
         for (i32 b = 0; b < p1; ++b) {
             f64 s = 0.0;
             for (i32 i = 0; i < frame_len; ++i) {
-                s += pow(as<f64>(i - m), a + b);
+                s += ipow(as<f64>(i - m), a + b);
             }
             ata[as<usize>(a) * as<usize>(p1) + as<usize>(b)] = s;
         }
@@ -630,10 +643,10 @@ StatsStatus smooth_sgolay_matrix(i32 frame_len, i32 deg, Array<f64>& out_b, Allo
         for (i32 j = 0; j < frame_len; ++j) {
             f64 s = 0.0;
             for (i32 a = 0; a < p1; ++a) {
-                const f64 ia = pow(as<f64>(i - m), a);
+                const f64 ia = ipow(as<f64>(i - m), a);
                 for (i32 b = 0; b < p1; ++b) {
                     s += ia * aug[as<usize>(a) * as<usize>(w) + as<usize>(p1 + b)] *
-                         pow(as<f64>(j - m), b);
+                         ipow(as<f64>(j - m), b);
                 }
             }
             out_b[as<usize>(i) * as<usize>(frame_len) + as<usize>(j)] = s;
@@ -644,6 +657,13 @@ StatsStatus smooth_sgolay_matrix(i32 frame_len, i32 deg, Array<f64>& out_b, Allo
 
 void smooth_sgolay_strided(const f64* src, usize n, isize step, ArrayRef<f64> b_row_major,
                            i32 frame_len, f64* dst) noexcept {
+    if (n == 0 || frame_len < 1 || as<usize>(frame_len) > n) {
+        return;
+    }
+    const usize fl = as<usize>(frame_len);
+    if (fl > Limits<usize>::kMax / fl || b_row_major.size() < fl * fl) {
+        return;
+    }
     const i32 n_i = as<i32>(n);
     const i32 m = (frame_len - 1) / 2;
     for (i32 nn = 0; nn < n_i; ++nn) {
@@ -658,7 +678,7 @@ void smooth_sgolay_strided(const f64* src, usize n, isize step, ArrayRef<f64> b_
         }
         f64 s = 0.0;
         for (i32 j = 0; j < frame_len; ++j) {
-            s += b_row_major[as<usize>(row) * as<usize>(frame_len) + as<usize>(j)] *
+            s += b_row_major[as<usize>(row) * fl + as<usize>(j)] *
                  src[as<isize>(base + j) * step];
         }
         dst[as<isize>(nn) * step] = s;
@@ -667,6 +687,9 @@ void smooth_sgolay_strided(const f64* src, usize n, isize step, ArrayRef<f64> b_
 
 void smooth_local_regress_strided(const f64* src, usize n, isize step, i32 frame_len, i32 deg,
                                   f64* dst) noexcept {
+    if (n == 0 || frame_len < 1 || as<usize>(frame_len) > n || deg < 0 || deg > 2) {
+        return;
+    }
     const i32 n_i = as<i32>(n);
     const i32 m = (frame_len - 1) / 2;
     const i32 p = deg + 1;
@@ -779,20 +802,32 @@ StatsStatus hampel_1d(ArrayRef<f64> src, i32 k, f64 nsigmas, MutArrayRef<f64> ds
         return StatsStatus::kOk;
     }
     ArenaTemp scratch = get_scratch(alloc);
-    const usize max_len = as<usize>(2 * k + 1);
+    const usize max_len = min<usize>(n, as<usize>(k) * 2u + 1u);
     Array<f64> buf(max_len, 0.0, scratch.allocator());
     Array<f64> copy1(max_len, 0.0, scratch.allocator());
     Array<f64> devs(max_len, 0.0, scratch.allocator());
 
     const i64 n_i = as<i64>(n);
+    const i64 k64 = as<i64>(k);
     for (i64 i = 0; i < n_i; ++i) {
-        const i64 lo = max<i64>(0, i - k);
-        const i64 hi = min<i64>(n_i - 1, i + k);
-        const usize len = as<usize>(hi - lo + 1);
-        for (usize j = 0; j < len; ++j) {
-            const f64 v = src[as<usize>(lo) + j];
-            buf[j] = v;
-            copy1[j] = v;
+        const i64 lo = max<i64>(0, i - k64);
+        const i64 hi = min<i64>(n_i - 1, i + k64);
+        usize len = 0;
+        for (i64 pos = lo; pos <= hi; ++pos) {
+            const f64 v = src[as<usize>(pos)];
+            if (!is_nan(v)) {
+                buf[len] = v;
+                copy1[len] = v;
+                ++len;
+            }
+        }
+        const usize ui = as<usize>(i);
+        if (len == 0) {
+            dst[ui] = qnan();
+            if (!mask.empty()) mask[ui] = 0u;
+            if (!median_out.empty()) median_out[ui] = qnan();
+            if (!sigma_out.empty()) sigma_out[ui] = qnan();
+            continue;
         }
         const f64 med = win_median_inplace(copy1.data(), len);
         for (usize j = 0; j < len; ++j) {
@@ -800,8 +835,7 @@ StatsStatus hampel_1d(ArrayRef<f64> src, i32 k, f64 nsigmas, MutArrayRef<f64> ds
         }
         const f64 mad = win_median_inplace(devs.data(), len);
         const f64 sig = kMadToStd * mad;
-        const usize ui = as<usize>(i);
-        const bool is_out = abs(src[ui] - med) > nsigmas * sig;
+        const bool is_out = !is_nan(src[ui]) && (abs(src[ui] - med) > nsigmas * sig);
         dst[ui] = is_out ? med : src[ui];
         if (!mask.empty()) {
             mask[ui] = is_out ? 1u : 0u;
@@ -822,7 +856,8 @@ StatsStatus hampel_1d(ArrayRef<f64> src, i32 k, f64 nsigmas, MutArrayRef<f64> ds
 
 StatsStatus halton_net(usize n, usize d, i64 skip, i64 leap, bool rr2_scramble,
                        MutArrayRef<f64> out_col_major, Allocator* alloc) {
-    if (d == 0 || out_col_major.size() < n * d) {
+    if (d == 0 || skip < 0 || leap < 0 || (n > Limits<usize>::kMax / d) ||
+        out_col_major.size() < n * d) {
         return StatsStatus::kInvalidArgument;
     }
     if (n == 0) {

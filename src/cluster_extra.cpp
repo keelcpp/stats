@@ -7,15 +7,27 @@ namespace keel::stats {
 
 namespace {
 
+inline bool mul_overflows(usize a, usize b) noexcept {
+    return a != 0u && b > Limits<usize>::kMax / a;
+}
+
 inline f64 dist_pair_row(const f64* a, const f64* b, usize d, DistanceMetric m, f64 p) noexcept {
     switch (m) {
         case DistanceMetric::kEuclidean: {
+            f64 scale = 0.0;
+            for (usize k = 0; k < d; ++k) {
+                const f64 ad = abs(a[k] - b[k]);
+                if (is_nan(ad)) return Limits<f64>::quiet_nan();
+                if (ad > scale) scale = ad;
+            }
+            if (scale == 0.0 || is_inf(scale)) return scale;
+            const f64 inv_s = 1.0 / scale;
             f64 s = 0.0;
             for (usize k = 0; k < d; ++k) {
-                const f64 diff = a[k] - b[k];
+                const f64 diff = (a[k] - b[k]) * inv_s;
                 s += diff * diff;
             }
-            return sqrt(s);
+            return scale * sqrt(s);
         }
         case DistanceMetric::kSqEuclidean: {
             f64 s = 0.0;
@@ -34,14 +46,23 @@ inline f64 dist_pair_row(const f64* a, const f64* b, usize d, DistanceMetric m, 
             f64 mv = 0.0;
             for (usize k = 0; k < d; ++k) {
                 const f64 diff = abs(a[k] - b[k]);
+                if (is_nan(diff)) return Limits<f64>::quiet_nan();
                 if (diff > mv) mv = diff;
             }
             return mv;
         }
         case DistanceMetric::kMinkowski: {
+            f64 scale = 0.0;
+            for (usize k = 0; k < d; ++k) {
+                const f64 ad = abs(a[k] - b[k]);
+                if (is_nan(ad)) return Limits<f64>::quiet_nan();
+                if (ad > scale) scale = ad;
+            }
+            if (scale == 0.0 || is_inf(scale) || is_inf(p)) return scale;
+            const f64 inv_s = 1.0 / scale;
             f64 s = 0.0;
-            for (usize k = 0; k < d; ++k) s += pow(abs(a[k] - b[k]), p);
-            return pow(s, 1.0 / p);
+            for (usize k = 0; k < d; ++k) s += pow(abs(a[k] - b[k]) * inv_s, p);
+            return scale * pow(s, 1.0 / p);
         }
         case DistanceMetric::kCosine: {
             f64 xy = 0.0;
@@ -53,27 +74,55 @@ inline f64 dist_pair_row(const f64* a, const f64* b, usize d, DistanceMetric m, 
                 yy += b[k] * b[k];
             }
             const f64 denom = sqrt(xx) * sqrt(yy);
-            return (denom > 0.0) ? (1.0 - xy / denom) : 1.0;
+            if (!(denom > 0.0)) return Limits<f64>::quiet_nan();
+            const f64 dist = 1.0 - xy / denom;
+            return is_nan(dist) ? dist : clamp(dist, 0.0, 2.0);
+        }
+        case DistanceMetric::kCorrelation: {
+            if (d == 0) return Limits<f64>::quiet_nan();
+            f64 ma = 0.0;
+            f64 mb = 0.0;
+            for (usize k = 0; k < d; ++k) {
+                ma += a[k];
+                mb += b[k];
+            }
+            ma /= as<f64>(d);
+            mb /= as<f64>(d);
+            f64 ab = 0.0;
+            f64 aa = 0.0;
+            f64 bb = 0.0;
+            for (usize k = 0; k < d; ++k) {
+                const f64 da = a[k] - ma;
+                const f64 db = b[k] - mb;
+                ab += da * db;
+                aa += da * da;
+                bb += db * db;
+            }
+            const f64 denom = sqrt(aa) * sqrt(bb);
+            if (!(denom > 0.0)) return Limits<f64>::quiet_nan();
+            const f64 dist = 1.0 - ab / denom;
+            return is_nan(dist) ? dist : clamp(dist, 0.0, 2.0);
         }
         case DistanceMetric::kHamming: {
-            i32 diff = 0;
+            if (d == 0) return 0.0;
+            usize diff = 0;
             for (usize k = 0; k < d; ++k) {
                 if (a[k] != b[k]) ++diff;
             }
-            return (d > 0) ? (as<f64>(diff) / as<f64>(d)) : 0.0;
+            return as<f64>(diff) / as<f64>(d);
         }
         case DistanceMetric::kJaccard: {
-            i32 diff = 0;
-            i32 considered = 0;
+            usize diff = 0;
+            usize considered = 0;
             for (usize k = 0; k < d; ++k) {
-                const bool xi = a[k] != 0.0;
-                const bool yi = b[k] != 0.0;
-                if (xi || yi) {
+                if (is_nan(a[k]) || is_nan(b[k])) return Limits<f64>::quiet_nan();
+                if (a[k] != 0.0 || b[k] != 0.0) {
                     ++considered;
-                    if (xi != yi) ++diff;
+                    if (a[k] != b[k]) ++diff;
                 }
             }
-            return (considered > 0) ? (as<f64>(diff) / as<f64>(considered)) : 0.0;
+            return (considered > 0) ? (as<f64>(diff) / as<f64>(considered))
+                                    : Limits<f64>::quiet_nan();
         }
         default: {
             f64 s = 0.0;
@@ -103,8 +152,12 @@ StatsStatus kmedoids_pam_step(ArrayRef<f64> x_col_major, usize n, usize d,
                               MutArrayRef<i32> out_medoids, MutArrayRef<f64> out_sumd,
                               f64& out_total, i32& out_iters, Allocator* alloc) {
     const usize k_cnt = init_medoids.size();
-    if (n == 0 || d == 0 || k_cnt == 0 || k_cnt > n || x_col_major.size() != n * d ||
-        out_idx.size() != n || out_medoids.size() != k_cnt || out_sumd.size() != k_cnt) {
+    if (n == 0 || d == 0 || k_cnt == 0 || k_cnt > n || mul_overflows(n, d) ||
+        x_col_major.size() != n * d || out_idx.size() != n || out_medoids.size() != k_cnt ||
+        out_sumd.size() != k_cnt) {
+        return StatsStatus::kInvalidArgument;
+    }
+    if (metric == DistanceMetric::kMinkowski && !(minkowski_p > 0.0)) {
         return StatsStatus::kInvalidArgument;
     }
     if (max_iter <= 0) max_iter = 100;
@@ -122,6 +175,7 @@ StatsStatus kmedoids_pam_step(ArrayRef<f64> x_col_major, usize n, usize d,
     Array<i32> members(alloc);
     members.reserve(n);
     i32 iters = 0;
+    bool last_changed = false;
 
     for (i32 iter = 0; iter < max_iter; ++iter) {
         ++iters;
@@ -169,17 +223,35 @@ StatsStatus kmedoids_pam_step(ArrayRef<f64> x_col_major, usize n, usize d,
                 changed = true;
             }
         }
+        last_changed = changed;
         if (!changed) break;
     }
 
+    // Ensure final assignment matches final medoids if max_iter ended right after a swap.
     f64 total = 0.0;
     for (usize k = 0; k < k_cnt; ++k) out_sumd[k] = 0.0;
     for (usize i = 0; i < n; ++i) {
-        const usize k = as<usize>(out_idx[i]);
-        const f64 dist = dist_pair_row(&xv[i * d], &xv[as<usize>(out_medoids[k]) * d], d, metric,
-                                       minkowski_p);
-        out_sumd[k] += dist;
-        total += dist;
+        if (last_changed) {
+            i32 best = 0;
+            f64 bd = Limits<f64>::infinity();
+            for (usize k = 0; k < k_cnt; ++k) {
+                const f64 dist = dist_pair_row(&xv[i * d], &xv[as<usize>(out_medoids[k]) * d], d,
+                                               metric, minkowski_p);
+                if (dist < bd) {
+                    bd = dist;
+                    best = as<i32>(k);
+                }
+            }
+            out_idx[i] = best;
+            out_sumd[as<usize>(best)] += bd;
+            total += bd;
+        } else {
+            const usize k = as<usize>(out_idx[i]);
+            const f64 dist = dist_pair_row(&xv[i * d], &xv[as<usize>(out_medoids[k]) * d], d,
+                                           metric, minkowski_p);
+            out_sumd[k] += dist;
+            total += dist;
+        }
     }
     out_total = total;
     out_iters = iters;
@@ -192,11 +264,18 @@ StatsStatus dbscan(ArrayRef<f64> x_col_major, usize n, usize d, f64 eps, i32 min
     if (!(eps > 0.0) || out_labels.size() != n || out_core.size() != n) {
         return StatsStatus::kInvalidArgument;
     }
+    if (!precomputed && metric == DistanceMetric::kMinkowski && !(minkowski_p > 0.0)) {
+        return StatsStatus::kInvalidArgument;
+    }
     if (minpts <= 0) minpts = 1;
     if (precomputed) {
-        if (x_col_major.size() != n * n) return StatsStatus::kInvalidArgument;
+        if (mul_overflows(n, n) || x_col_major.size() != n * n) {
+            return StatsStatus::kInvalidArgument;
+        }
     } else {
-        if (x_col_major.size() != n * d) return StatsStatus::kInvalidArgument;
+        if (mul_overflows(n, d) || x_col_major.size() != n * d) {
+            return StatsStatus::kInvalidArgument;
+        }
     }
     if (n == 0) return StatsStatus::kOk;
 
@@ -226,6 +305,7 @@ StatsStatus dbscan(ArrayRef<f64> x_col_major, usize n, usize d, f64 eps, i32 min
     Array<i32> nbrs(alloc);
     Array<i32> qn(alloc);
     Array<i32> seeds(alloc);
+    Array<u8> in_seeds(n, u8{0}, alloc);
     nbrs.reserve(64);
     qn.reserve(64);
     seeds.reserve(n);
@@ -242,23 +322,32 @@ StatsStatus dbscan(ArrayRef<f64> x_col_major, usize n, usize d, f64 eps, i32 min
         out_core[i] = 1;
 
         seeds.clear();
-        for (usize m = 0; m < nbrs.size(); ++m) seeds.push_back(nbrs[m]);
+        for (usize m = 0; m < nbrs.size(); ++m) {
+            const usize u = as<usize>(nbrs[m]);
+            if (u != i && !in_seeds[u]) {
+                in_seeds[u] = 1u;
+                seeds.push_back(nbrs[m]);
+            }
+        }
         for (usize s = 0; s < seeds.size(); ++s) {
-            const i32 q = seeds[s];
-            if (as<usize>(q) == i) continue;
-            if (out_labels[as<usize>(q)] == -1) out_labels[as<usize>(q)] = cluster;
-            if (out_labels[as<usize>(q)] != 0) continue;
-            out_labels[as<usize>(q)] = cluster;
-            neighbours(as<usize>(q), qn);
+            const usize qu = as<usize>(seeds[s]);
+            if (out_labels[qu] == -1) out_labels[qu] = cluster;
+            if (out_labels[qu] != 0) continue;
+            out_labels[qu] = cluster;
+            neighbours(qu, qn);
             if (as<i32>(qn.size()) >= minpts) {
-                out_core[as<usize>(q)] = 1;
+                out_core[qu] = 1;
                 for (usize m = 0; m < qn.size(); ++m) {
-                    const i32 nb = qn[m];
-                    if (out_labels[as<usize>(nb)] == 0 || out_labels[as<usize>(nb)] == -1) {
-                        seeds.push_back(nb);
+                    const usize nbu = as<usize>(qn[m]);
+                    if ((out_labels[nbu] == 0 || out_labels[nbu] == -1) && !in_seeds[nbu]) {
+                        in_seeds[nbu] = 1u;
+                        seeds.push_back(qn[m]);
                     }
                 }
             }
+        }
+        for (usize s = 0; s < seeds.size(); ++s) {
+            in_seeds[as<usize>(seeds[s])] = 0u;
         }
     }
     return StatsStatus::kOk;
@@ -267,7 +356,8 @@ StatsStatus dbscan(ArrayRef<f64> x_col_major, usize n, usize d, f64 eps, i32 min
 StatsStatus silhouette(ArrayRef<f64> x_col_major, usize n, usize d, ArrayRef<i32> labels,
                        DistanceMetric metric, f64 minkowski_p, MutArrayRef<f64> out_s,
                        Allocator* alloc) {
-    if (x_col_major.size() != n * d || labels.size() != n || out_s.size() != n) {
+    if (mul_overflows(n, d) || mul_overflows(n, n) || x_col_major.size() != n * d ||
+        labels.size() != n || out_s.size() != n) {
         return StatsStatus::kInvalidArgument;
     }
     if (n == 0) return StatsStatus::kOk;
@@ -319,6 +409,7 @@ StatsStatus silhouette(ArrayRef<f64> x_col_major, usize n, usize d, ArrayRef<i32
         a /= as<f64>(my_sz - 1);
 
         f64 b = Limits<f64>::infinity();
+        bool b_nan = false;
         for (usize cid = 0; cid < K; ++cid) {
             if (cid == my_c) continue;
             f64 m = 0.0;
@@ -326,9 +417,13 @@ StatsStatus silhouette(ArrayRef<f64> x_col_major, usize n, usize d, ArrayRef<i32
                 m += dist_mat[i + members[pos] * n];
             }
             m /= as<f64>(counts[cid]);
+            if (is_nan(m)) {
+                b_nan = true;
+                break;
+            }
             if (m < b) b = m;
         }
-        if (!is_finite(b)) {
+        if (is_nan(a) || b_nan || !is_finite(b)) {
             out_s[i] = Limits<f64>::quiet_nan();
             continue;
         }

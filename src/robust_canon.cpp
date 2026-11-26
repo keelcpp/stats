@@ -61,7 +61,7 @@ bool gauss_solve(f64* m, f64* b, usize p) noexcept {
 }
 
 // Weighted OLS: solve (X' W X) beta = X' W y. X is n x p col-major.
-void weighted_ls(const f64* x, usize n, usize p, const f64* y, const f64* w, f64* beta_out,
+bool weighted_ls(const f64* x, usize n, usize p, const f64* y, const f64* w, f64* beta_out,
                  Allocator* alloc) {
     ArenaTemp scratch = get_scratch(alloc);
     Array<f64> m(p * p, 0.0, scratch.allocator());
@@ -84,7 +84,9 @@ void weighted_ls(const f64* x, usize n, usize p, const f64* y, const f64* w, f64
         for (usize i = 0; i < p; ++i) {
             beta_out[i] = nanv;
         }
+        return false;
     }
+    return true;
 }
 
 f64 robust_weight_val(RobustWeight wt, f64 u) noexcept {
@@ -380,7 +382,8 @@ f64 normal_range_cdf(f64 w, usize k) noexcept {
         }
         return s * half;
     };
-    return min(1.0, max(0.0, kd * (quad16(-8.5, -1.5) + quad16(-1.5, 5.5))));
+    return min(1.0, max(0.0, kd * (quad16(-8.5, -4.5) + quad16(-4.5, -1.5) + quad16(-1.5, 2.0) +
+                                   quad16(2.0, 5.5))));
 }
 
 } // namespace
@@ -416,11 +419,25 @@ f64 robust_default_tune(RobustWeight wt) noexcept {
 StatsStatus robustfit(ArrayRef<f64> x_col_major, usize n, usize p, ArrayRef<f64> y,
                       RobustWeight weight, f64 tune, MutArrayRef<f64> out_beta, f64& out_s,
                       Allocator* alloc) {
-    if (p == 0 || n <= p || x_col_major.size() < n * p || y.size() < n || out_beta.size() < p) {
+    if (p == 0 || n <= p || (n > Limits<usize>::kMax / p) || x_col_major.size() < n * p ||
+        y.size() < n || out_beta.size() < p) {
         return StatsStatus::kInvalidArgument;
     }
     if (is_nan(tune)) {
         tune = robust_default_tune(weight);
+    }
+    if (!(tune > 0.0) || !is_finite(tune)) {
+        return StatsStatus::kInvalidArgument;
+    }
+    for (usize i = 0; i < n; ++i) {
+        if (!is_finite(y[i])) {
+            return StatsStatus::kInvalidArgument;
+        }
+    }
+    for (usize i = 0; i < n * p; ++i) {
+        if (!is_finite(x_col_major[i])) {
+            return StatsStatus::kInvalidArgument;
+        }
     }
 
     ArenaTemp scratch = get_scratch(alloc);
@@ -440,7 +457,10 @@ StatsStatus robustfit(ArrayRef<f64> x_col_major, usize n, usize p, ArrayRef<f64>
     Array<f64> w(n, 1.0, scratch.allocator());
     Array<f64> beta(p, 0.0, scratch.allocator());
     Array<f64> beta_prev(p, 0.0, scratch.allocator());
-    weighted_ls(x_col_major.data(), n, p, y.data(), w.data(), beta.data(), scratch.allocator());
+    if (!weighted_ls(x_col_major.data(), n, p, y.data(), w.data(), beta.data(),
+                     scratch.allocator())) {
+        return StatsStatus::kSingularMatrix;
+    }
 
     Array<f64> r(n, 0.0, scratch.allocator());
     Array<f64> radj(n, 0.0, scratch.allocator());
@@ -460,7 +480,11 @@ StatsStatus robustfit(ArrayRef<f64> x_col_major, usize n, usize p, ArrayRef<f64>
             w[i] = robust_weight_val(weight, radj[i] / denom);
         }
         copy_n(beta_prev.data(), beta.data(), p);
-        weighted_ls(x_col_major.data(), n, p, y.data(), w.data(), beta.data(), scratch.allocator());
+        if (!weighted_ls(x_col_major.data(), n, p, y.data(), w.data(), beta.data(),
+                         scratch.allocator())) {
+            copy_n(beta.data(), beta_prev.data(), p);
+            break;
+        }
 
         bool changed = false;
         for (usize j = 0; j < p; ++j) {
@@ -481,9 +505,14 @@ StatsStatus robustfit(ArrayRef<f64> x_col_major, usize n, usize p, ArrayRef<f64>
 StatsStatus robustcov(ArrayRef<f64> x_col_major, usize n, usize d,
                       MutArrayRef<f64> out_sigma_col_major, MutArrayRef<f64> out_mu,
                       Allocator* alloc) {
-    if (d == 0 || n <= d + 1 || x_col_major.size() < n * d || out_sigma_col_major.size() < d * d ||
-        out_mu.size() < d) {
+    if (d == 0 || n <= d + 1 || (n > Limits<usize>::kMax / d) || (d > Limits<usize>::kMax / d) ||
+        x_col_major.size() < n * d || out_sigma_col_major.size() < d * d || out_mu.size() < d) {
         return StatsStatus::kInvalidArgument;
+    }
+    for (usize i = 0; i < n * d; ++i) {
+        if (!is_finite(x_col_major[i])) {
+            return StatsStatus::kInvalidArgument;
+        }
     }
 
     ArenaTemp scratch = get_scratch(alloc);
@@ -497,7 +526,7 @@ StatsStatus robustcov(ArrayRef<f64> x_col_major, usize n, usize d,
     Array<f64> inv_c(scratch.allocator());
     mean_cov_subset(x_col_major.data(), n, d, keep.as_ref(), mu, cov, scratch.allocator());
 
-    const usize h = as<usize>(ceil(0.75 * as<f64>(n)));
+    const usize h = min<usize>(n, as<usize>(ceil(0.75 * as<f64>(n))));
     Array<usize> prev_keep(scratch.allocator());
     Array<f64> diff(d, 0.0, scratch.allocator());
     Array<Pair<f64, usize>> pairs(n, Pair<f64, usize>{0.0, 0}, scratch.allocator());
@@ -519,7 +548,9 @@ StatsStatus robustcov(ArrayRef<f64> x_col_major, usize n, usize d,
             }
             pairs[i] = {md, i};
         }
-        nth_element(pairs.begin(), pairs.begin() + h, pairs.end());
+        if (h < n) {
+            nth_element(pairs.begin(), pairs.begin() + h, pairs.end());
+        }
         for (usize i = 0; i < h; ++i) {
             new_keep[i] = pairs[i].second;
         }
@@ -691,6 +722,15 @@ StatsStatus canoncorr(ArrayRef<f64> x_col_major, usize n, usize p, ArrayRef<f64>
 
     solve_upper(rx.data(), n, u.data(), p, k, out_a_col_major.data());
     solve_upper(ry.data(), n, v.data(), q, k, out_b_col_major.data());
+    // Scale canonical coefficients by sqrt(n - 1) so canonical variates U = Xc*A, V = Yc*B
+    // have unit sample variance (cov(U) = I, cov(V) = I), matching reference canoncorr.
+    const f64 scale = sqrt(as<f64>(n - 1));
+    for (usize i = 0; i < p * k; ++i) {
+        out_a_col_major[i] *= scale;
+    }
+    for (usize i = 0; i < q * k; ++i) {
+        out_b_col_major[i] *= scale;
+    }
     for (usize i = 0; i < k; ++i) {
         out_r[i] = min(1.0, max(0.0, sval[i]));
     }
@@ -702,10 +742,16 @@ StatsStatus canoncorr(ArrayRef<f64> x_col_major, usize n, usize p, ArrayRef<f64>
 // ============================================================================
 
 f64 studentized_range_cdf(f64 q, usize k, f64 df) noexcept {
-    if (q <= 0.0 || k < 2) {
+    if (is_nan(q) || is_nan(df) || !(df > 0.0) || k < 2) {
+        return Limits<f64>::quiet_nan();
+    }
+    if (q <= 0.0) {
         return 0.0;
     }
-    if (!is_finite(df) || df > 1e5) {
+    if (is_inf(q)) {
+        return 1.0;
+    }
+    if (is_inf(df) || df > 1e5) {
         return normal_range_cdf(q, k);
     }
 
@@ -715,11 +761,11 @@ f64 studentized_range_cdf(f64 q, usize k, f64 df) noexcept {
         if (u <= 0.0) {
             return 0.0;
         }
-        const f64 fu = exp(log_const + (df - 1.0) * log(u) - half_df * u * u);
-        if (fu <= 1e-30) {
+        const f64 lp = log_const + (df - 1.0) * log(u) - half_df * u * u;
+        if (lp < -700.0) {
             return 0.0;
         }
-        return fu * normal_range_cdf(q * u, k);
+        return exp(lp) * normal_range_cdf(q * u, k);
     };
     auto quad16 = [&](f64 a, f64 b) noexcept -> f64 {
         if (b <= a) {
@@ -734,17 +780,28 @@ f64 studentized_range_cdf(f64 q, usize k, f64 df) noexcept {
         }
         return s * half;
     };
-    const f64 spread = 8.0 / sqrt(max(0.5, df));
-    const f64 u_min = max(1e-6, 1.0 - spread);
+    const f64 spread = 10.0 / sqrt(max(0.5, df));
+    const f64 u_min = max(1e-7, 1.0 - spread);
     const f64 u_max = 1.0 + spread;
-    return min(1.0, max(0.0, quad16(u_min, 1.0) + quad16(1.0, u_max)));
+    // Composite 4 panels on each side of the mode u = 1 for high accuracy at low df.
+    f64 total = 0.0;
+    const f64 step_lo = (1.0 - u_min) / 4.0;
+    const f64 step_hi = (u_max - 1.0) / 4.0;
+    for (i32 p = 0; p < 4; ++p) {
+        total += quad16(u_min + as<f64>(p) * step_lo, u_min + as<f64>(p + 1) * step_lo);
+        total += quad16(1.0 + as<f64>(p) * step_hi, 1.0 + as<f64>(p + 1) * step_hi);
+    }
+    return min(1.0, max(0.0, total));
 }
 
 f64 studentized_range_inv(f64 p, usize k, f64 df) noexcept {
-    if (p <= 0.0) {
+    if (is_nan(p) || p < 0.0 || p > 1.0 || is_nan(df) || !(df > 0.0) || k < 2) {
+        return Limits<f64>::quiet_nan();
+    }
+    if (p == 0.0) {
         return 0.0;
     }
-    if (p >= 1.0) {
+    if (p == 1.0) {
         return Limits<f64>::infinity();
     }
     f64 lo = 0.0;
@@ -770,8 +827,14 @@ f64 studentized_range_inv(f64 p, usize k, f64 df) noexcept {
 StatsStatus multcompare(ArrayRef<f64> means, ArrayRef<f64> counts, f64 s, f64 df, f64 alpha,
                         McCorrection ctype, MutArrayRef<f64> out_col_major) noexcept {
     const usize k = means.size();
-    if (k < 2 || counts.size() < k || alpha <= 0.0 || alpha >= 1.0 || is_nan(alpha)) {
+    if (k < 2 || counts.size() < k || !(s >= 0.0) || !is_finite(s) || !(df > 0.0) ||
+        !(alpha > 0.0 && alpha < 1.0)) {
         return StatsStatus::kInvalidArgument;
+    }
+    for (usize i = 0; i < k; ++i) {
+        if (!is_finite(means[i]) || !(counts[i] > 0.0) || !is_finite(counts[i])) {
+            return StatsStatus::kInvalidArgument;
+        }
     }
     const usize n_pairs = k * (k - 1) / 2;
     if (out_col_major.size() < n_pairs * 6) {

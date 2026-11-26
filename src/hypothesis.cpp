@@ -14,28 +14,34 @@ namespace keel::stats {
 
 namespace {
 
-void sample_mean_var(ArrayRef<f64> x, f64& mean_out, f64& var_out) noexcept {
-    const usize n = x.size();
-    if (n == 0) {
+usize sample_mean_var(ArrayRef<f64> x, f64& mean_out, f64& var_out) noexcept {
+    usize n_eff = 0;
+    f64 s = 0.0;
+    for (usize i = 0; i < x.size(); ++i) {
+        if (!is_nan(x[i])) {
+            s += x[i];
+            ++n_eff;
+        }
+    }
+    if (n_eff == 0) {
         mean_out = 0.0;
         var_out = 0.0;
-        return;
+        return 0;
     }
-    f64 s = 0.0;
-    for (usize i = 0; i < n; ++i) {
-        s += x[i];
-    }
-    mean_out = s / as<f64>(n);
-    if (n < 2) {
+    mean_out = s / as<f64>(n_eff);
+    if (n_eff < 2) {
         var_out = 0.0;
-        return;
+        return n_eff;
     }
     f64 sq = 0.0;
-    for (usize i = 0; i < n; ++i) {
-        const f64 d = x[i] - mean_out;
-        sq += d * d;
+    for (usize i = 0; i < x.size(); ++i) {
+        if (!is_nan(x[i])) {
+            const f64 d = x[i] - mean_out;
+            sq += d * d;
+        }
     }
-    var_out = sq / as<f64>(n - 1);
+    var_out = sq / as<f64>(n_eff - 1);
+    return n_eff;
 }
 
 f64 tail_from_cdf(f64 cdf, TestTail tail) noexcept {
@@ -87,6 +93,11 @@ void mat_power(const f64* a, i32 ea, Array<f64>& v, i32& ev, i32 m, i32 n, Alloc
             v[i] *= 1e-140;
         }
         ev += 140;
+    } else if (v[mid] > 0.0 && v[mid] < 1e-140) {
+        for (usize i = 0; i < sz; ++i) {
+            v[i] *= 1e140;
+        }
+        ev -= 140;
     }
 }
 
@@ -173,7 +184,22 @@ f64 ks_one_sample_two_sided_p(i32 n, f64 d, Allocator* alloc) {
     if (s > 7.24 || (s > 3.76 && n > 99)) {
         return min(1.0, 2.0 * exp(-(2.000071 + 0.331 / sqrt(as<f64>(n)) + 1.409 / as<f64>(n)) * s));
     }
-    return 1.0 - marsaglia_k(n, d, alloc);
+    if (as<f64>(n) * d > 60.0) {
+        // Large-n asymptotic Kolmogorov series when Marsaglia matrix dimension exceeds 120.
+        const f64 dn = as<f64>(n);
+        const f64 lam = (sqrt(dn) + 0.12 + 0.11 / sqrt(dn)) * d;
+        f64 total = 0.0;
+        for (i32 k = 1; k <= 101; ++k) {
+            const f64 dk = as<f64>(k);
+            const f64 term = exp(-2.0 * lam * lam * dk * dk);
+            total += ((k & 1) != 0) ? term : -term;
+            if (term < 1e-20 && k > 4) {
+                break;
+            }
+        }
+        return clamp(2.0 * total, 0.0, 1.0);
+    }
+    return clamp(1.0 - marsaglia_k(n, d, alloc), 0.0, 1.0);
 }
 
 f64 ks_two_sample_p(f64 neff, f64 d, bool two_sided) noexcept {
@@ -324,16 +350,18 @@ i64 lcm_i64(i64 a, i64 b) noexcept {
 
 StatsStatus ttest_1sample(ArrayRef<f64> x, f64 m, f64 alpha, TestTail tail,
                           TTestResult& out) noexcept {
-    const usize n = x.size();
-    if (n < 2) {
+    if (is_nan(m)) {
         return StatsStatus::kInvalidArgument;
     }
-    if (alpha <= 0.0 || alpha >= 1.0) {
+    if (!(alpha > 0.0 && alpha < 1.0)) {
         alpha = 0.05;
     }
     f64 mu_hat = 0.0;
     f64 var_hat = 0.0;
-    sample_mean_var(x, mu_hat, var_hat);
+    const usize n = sample_mean_var(x, mu_hat, var_hat);
+    if (n < 2) {
+        return StatsStatus::kInvalidArgument;
+    }
     const f64 sd = sqrt(var_hat);
     const f64 se = sd / sqrt(as<f64>(n));
     const f64 t = (mu_hat - m) / se;
@@ -370,17 +398,15 @@ StatsStatus ttest_1sample(ArrayRef<f64> x, f64 m, f64 alpha, TestTail tail,
 
 StatsStatus ttest_2sample(ArrayRef<f64> x, ArrayRef<f64> y, f64 alpha, TestTail tail,
                           bool equal_var, TTest2Result& out) noexcept {
-    const usize nx = x.size();
-    const usize ny = y.size();
-    if (nx < 2 || ny < 2) {
-        return StatsStatus::kInvalidArgument;
-    }
-    if (alpha <= 0.0 || alpha >= 1.0) {
+    if (!(alpha > 0.0 && alpha < 1.0)) {
         alpha = 0.05;
     }
     f64 mx = 0.0, vx = 0.0, my = 0.0, vy = 0.0;
-    sample_mean_var(x, mx, vx);
-    sample_mean_var(y, my, vy);
+    const usize nx = sample_mean_var(x, mx, vx);
+    const usize ny = sample_mean_var(y, my, vy);
+    if (nx < 2 || ny < 2) {
+        return StatsStatus::kInvalidArgument;
+    }
 
     const f64 dnx = as<f64>(nx);
     const f64 dny = as<f64>(ny);
@@ -400,97 +426,196 @@ StatsStatus ttest_2sample(ArrayRef<f64> x, ArrayRef<f64> y, f64 alpha, TestTail 
         const f64 den = tx * tx / (dnx - 1.0) + ty * ty / (dny - 1.0);
         df = (den > 0.0) ? (num / den) : (dnx + dny - 2.0);
     }
-    const f64 t = (mx - my) / se;
+    const f64 diff = mx - my;
+    const f64 t = diff / se;
     const f64 p = tail_from_cdf(t_cdf(t, df), tail);
     const i32 h = (p < alpha) ? 1 : 0;
-    const f64 tcrit = t_inv(1.0 - 0.5 * alpha, df);
-    out = TTest2Result{
-        h, p, (mx - my) - tcrit * se, (mx - my) + tcrit * se, t, df, sqrt(vx), sqrt(vy), sd_pooled};
+    f64 clo = 0.0;
+    f64 chi = 0.0;
+    const f64 inf_v = Limits<f64>::infinity();
+    switch (tail) {
+        case TestTail::kBoth: {
+            const f64 tcrit = t_inv(1.0 - 0.5 * alpha, df);
+            clo = diff - tcrit * se;
+            chi = diff + tcrit * se;
+            break;
+        }
+        case TestTail::kRight: {
+            const f64 tc = t_inv(1.0 - alpha, df);
+            clo = diff - tc * se;
+            chi = inf_v;
+            break;
+        }
+        case TestTail::kLeft: {
+            const f64 tc = t_inv(1.0 - alpha, df);
+            clo = -inf_v;
+            chi = diff + tc * se;
+            break;
+        }
+    }
+    out = TTest2Result{h, p, clo, chi, t, df, sqrt(vx), sqrt(vy), sd_pooled};
     return StatsStatus::kOk;
 }
 
 StatsStatus ztest_1sample(ArrayRef<f64> x, f64 m, f64 sigma, f64 alpha, TestTail tail,
                           ZTestResult& out) noexcept {
-    if (x.empty() || !(sigma > 0.0)) {
+    if (!(sigma > 0.0) || is_nan(m)) {
         return StatsStatus::kInvalidArgument;
     }
-    if (alpha <= 0.0 || alpha >= 1.0) {
+    if (!(alpha > 0.0 && alpha < 1.0)) {
         alpha = 0.05;
     }
     f64 mu_hat = 0.0;
     f64 var_hat = 0.0;
-    sample_mean_var(x, mu_hat, var_hat);
-    const f64 se = sigma / sqrt(as<f64>(x.size()));
+    const usize n = sample_mean_var(x, mu_hat, var_hat);
+    if (n == 0) {
+        return StatsStatus::kInvalidArgument;
+    }
+    const f64 se = sigma / sqrt(as<f64>(n));
     const f64 z = (mu_hat - m) / se;
     const f64 p = tail_from_cdf(norm_cdf(z, 0.0, 1.0), tail);
     const i32 h = (p < alpha) ? 1 : 0;
-    const f64 zcrit = norm_inv(1.0 - 0.5 * alpha, 0.0, 1.0);
-    out = ZTestResult{h, p, mu_hat - zcrit * se, mu_hat + zcrit * se, z};
+    f64 clo = 0.0;
+    f64 chi = 0.0;
+    const f64 inf_v = Limits<f64>::infinity();
+    switch (tail) {
+        case TestTail::kBoth: {
+            const f64 zcrit = norm_inv(1.0 - 0.5 * alpha, 0.0, 1.0);
+            clo = mu_hat - zcrit * se;
+            chi = mu_hat + zcrit * se;
+            break;
+        }
+        case TestTail::kRight: {
+            const f64 zc = norm_inv(1.0 - alpha, 0.0, 1.0);
+            clo = mu_hat - zc * se;
+            chi = inf_v;
+            break;
+        }
+        case TestTail::kLeft: {
+            const f64 zc = norm_inv(1.0 - alpha, 0.0, 1.0);
+            clo = -inf_v;
+            chi = mu_hat + zc * se;
+            break;
+        }
+    }
+    out = ZTestResult{h, p, clo, chi, z};
     return StatsStatus::kOk;
 }
 
 StatsStatus vartest_1sample(ArrayRef<f64> x, f64 v, f64 alpha, TestTail tail,
                             VarTestResult& out) noexcept {
-    if (x.size() < 2 || !(v > 0.0)) {
+    if (!(v > 0.0)) {
         return StatsStatus::kInvalidArgument;
     }
-    if (alpha <= 0.0 || alpha >= 1.0) {
+    if (!(alpha > 0.0 && alpha < 1.0)) {
         alpha = 0.05;
     }
     f64 mu_hat = 0.0;
     f64 var_hat = 0.0;
-    sample_mean_var(x, mu_hat, var_hat);
-    const f64 df = as<f64>(x.size() - 1);
+    const usize n = sample_mean_var(x, mu_hat, var_hat);
+    if (n < 2) {
+        return StatsStatus::kInvalidArgument;
+    }
+    const f64 df = as<f64>(n - 1);
     const f64 t_stat = df * var_hat / v;
     const f64 p = tail_from_cdf(chi2_cdf(t_stat, df), tail);
     const i32 h = (p < alpha) ? 1 : 0;
-    const f64 chi_lo = chi2_inv(0.5 * alpha, df);
-    const f64 chi_hi = chi2_inv(1.0 - 0.5 * alpha, df);
-    const f64 ci_lo = (chi_hi > 0.0) ? (df * var_hat / chi_hi) : 0.0;
-    const f64 ci_hi = (chi_lo > 0.0) ? (df * var_hat / chi_lo) : Limits<f64>::infinity();
+    const f64 inf_v = Limits<f64>::infinity();
+    f64 ci_lo = 0.0;
+    f64 ci_hi = inf_v;
+    switch (tail) {
+        case TestTail::kBoth: {
+            const f64 chi_lo = chi2_inv(0.5 * alpha, df);
+            const f64 chi_hi = chi2_inv(1.0 - 0.5 * alpha, df);
+            ci_lo = (chi_hi > 0.0) ? (df * var_hat / chi_hi) : 0.0;
+            ci_hi = (chi_lo > 0.0) ? (df * var_hat / chi_lo) : inf_v;
+            break;
+        }
+        case TestTail::kRight: {
+            const f64 chi_hi = chi2_inv(1.0 - alpha, df);
+            ci_lo = (chi_hi > 0.0) ? (df * var_hat / chi_hi) : 0.0;
+            ci_hi = inf_v;
+            break;
+        }
+        case TestTail::kLeft: {
+            const f64 chi_lo = chi2_inv(alpha, df);
+            ci_lo = 0.0;
+            ci_hi = (chi_lo > 0.0) ? (df * var_hat / chi_lo) : inf_v;
+            break;
+        }
+    }
     out = VarTestResult{h, p, ci_lo, ci_hi, t_stat, df};
     return StatsStatus::kOk;
 }
 
 StatsStatus vartest_2sample(ArrayRef<f64> x, ArrayRef<f64> y, f64 alpha, TestTail tail,
                             VarTest2Result& out) noexcept {
-    if (x.size() < 2 || y.size() < 2) {
-        return StatsStatus::kInvalidArgument;
-    }
-    if (alpha <= 0.0 || alpha >= 1.0) {
+    if (!(alpha > 0.0 && alpha < 1.0)) {
         alpha = 0.05;
     }
     f64 mx = 0.0, vx = 0.0, my = 0.0, vy = 0.0;
-    sample_mean_var(x, mx, vx);
-    sample_mean_var(y, my, vy);
+    const usize nx = sample_mean_var(x, mx, vx);
+    const usize ny = sample_mean_var(y, my, vy);
+    if (nx < 2 || ny < 2) {
+        return StatsStatus::kInvalidArgument;
+    }
     if (vy == 0.0) {
         return StatsStatus::kInvalidArgument;
     }
     const f64 f_stat = vx / vy;
-    const f64 v1 = as<f64>(x.size() - 1);
-    const f64 v2 = as<f64>(y.size() - 1);
+    const f64 v1 = as<f64>(nx - 1);
+    const f64 v2 = as<f64>(ny - 1);
     const f64 p = tail_from_cdf(f_cdf(f_stat, v1, v2), tail);
     const i32 h = (p < alpha) ? 1 : 0;
-    const f64 f_lo = f_inv(0.5 * alpha, v1, v2);
-    const f64 f_hi = f_inv(1.0 - 0.5 * alpha, v1, v2);
-    const f64 ci_lo = (f_hi > 0.0) ? (f_stat / f_hi) : 0.0;
-    const f64 ci_hi = (f_lo > 0.0) ? (f_stat / f_lo) : Limits<f64>::infinity();
+    const f64 inf_v = Limits<f64>::infinity();
+    f64 ci_lo = 0.0;
+    f64 ci_hi = inf_v;
+    switch (tail) {
+        case TestTail::kBoth: {
+            const f64 f_lo = f_inv(0.5 * alpha, v1, v2);
+            const f64 f_hi = f_inv(1.0 - 0.5 * alpha, v1, v2);
+            ci_lo = (f_hi > 0.0) ? (f_stat / f_hi) : 0.0;
+            ci_hi = (f_lo > 0.0) ? (f_stat / f_lo) : inf_v;
+            break;
+        }
+        case TestTail::kRight: {
+            const f64 f_hi = f_inv(1.0 - alpha, v1, v2);
+            ci_lo = (f_hi > 0.0) ? (f_stat / f_hi) : 0.0;
+            ci_hi = inf_v;
+            break;
+        }
+        case TestTail::kLeft: {
+            const f64 f_lo = f_inv(alpha, v1, v2);
+            ci_lo = 0.0;
+            ci_hi = (f_lo > 0.0) ? (f_stat / f_lo) : inf_v;
+            break;
+        }
+    }
     out = VarTest2Result{h, p, ci_lo, ci_hi, f_stat, v1, v2};
     return StatsStatus::kOk;
 }
 
 StatsStatus kstest_1sample(ArrayRef<f64> x, ArrayRef<f64> cdf_x, ArrayRef<f64> cdf_f, f64 alpha,
                            TestTail tail, KsTestResult& out, Allocator* alloc) {
-    const usize n = x.size();
-    if (n == 0 || cdf_x.size() != cdf_f.size()) {
+    if (cdf_x.size() != cdf_f.size()) {
         return StatsStatus::kInvalidArgument;
     }
-    if (alpha <= 0.0 || alpha >= 1.0) {
+    if (!(alpha > 0.0 && alpha < 1.0)) {
         alpha = 0.05;
     }
 
     ArenaTemp scratch = get_scratch(alloc);
-    Array<f64> xs(x, scratch.allocator());
+    Array<f64> xs(scratch.allocator());
+    xs.reserve(x.size());
+    for (usize i = 0; i < x.size(); ++i) {
+        if (!is_nan(x[i])) {
+            xs.push_back(x[i]);
+        }
+    }
+    const usize n = xs.size();
+    if (n == 0) {
+        return StatsStatus::kInvalidArgument;
+    }
     sort(xs.as_mut_ref());
 
     Array<f64> xg(scratch.allocator());
@@ -498,6 +623,11 @@ StatsStatus kstest_1sample(ArrayRef<f64> x, ArrayRef<f64> cdf_x, ArrayRef<f64> c
     const bool use_table = !cdf_x.empty();
     if (use_table) {
         const usize rows = cdf_x.size();
+        for (usize i = 0; i < rows; ++i) {
+            if (is_nan(cdf_x[i]) || is_nan(cdf_f[i])) {
+                return StatsStatus::kInvalidArgument;
+            }
+        }
         Array<usize> ord(rows, usize{0}, scratch.allocator());
         for (usize i = 0; i < rows; ++i) {
             ord[i] = i;
@@ -551,21 +681,34 @@ StatsStatus kstest_1sample(ArrayRef<f64> x, ArrayRef<f64> cdf_x, ArrayRef<f64> c
 
 StatsStatus kstest_2sample(ArrayRef<f64> x, ArrayRef<f64> y, f64 alpha, TestTail tail,
                            KsTestResult& out, Allocator* alloc) {
-    const usize nx = x.size();
-    const usize ny = y.size();
-    if (nx == 0 || ny == 0) {
-        return StatsStatus::kInvalidArgument;
-    }
-    if (alpha <= 0.0 || alpha >= 1.0) {
+    if (!(alpha > 0.0 && alpha < 1.0)) {
         alpha = 0.05;
     }
 
     ArenaTemp scratch = get_scratch(alloc);
-    Array<f64> xs(x, scratch.allocator());
-    Array<f64> ys(y, scratch.allocator());
+    Array<f64> xs(scratch.allocator());
+    Array<f64> ys(scratch.allocator());
+    xs.reserve(x.size());
+    ys.reserve(y.size());
+    for (usize i = 0; i < x.size(); ++i) {
+        if (!is_nan(x[i])) {
+            xs.push_back(x[i]);
+        }
+    }
+    for (usize i = 0; i < y.size(); ++i) {
+        if (!is_nan(y[i])) {
+            ys.push_back(y[i]);
+        }
+    }
+    const usize nx = xs.size();
+    const usize ny = ys.size();
+    if (nx == 0 || ny == 0) {
+        return StatsStatus::kInvalidArgument;
+    }
     sort(xs.as_mut_ref());
     sort(ys.as_mut_ref());
 
+    // Advance past ALL ties at each distinct threshold v before comparing ECDF values.
     f64 d_plus = 0.0;
     f64 d_minus = 0.0;
     usize i = 0;
@@ -573,12 +716,11 @@ StatsStatus kstest_2sample(ArrayRef<f64> x, ArrayRef<f64> y, f64 alpha, TestTail
     const f64 dnx = as<f64>(nx);
     const f64 dny = as<f64>(ny);
     while (i < nx && j < ny) {
-        const f64 a = xs[i];
-        const f64 b = ys[j];
-        if (a <= b) {
+        const f64 v = min(xs[i], ys[j]);
+        while (i < nx && xs[i] == v) {
             ++i;
         }
-        if (b <= a) {
+        while (j < ny && ys[j] == v) {
             ++j;
         }
         const f64 fx = as<f64>(i) / dnx;
@@ -709,9 +851,19 @@ StatsStatus signtest(ArrayRef<f64> x, ArrayRef<f64> y, f64 m0, f64 alpha, TestTa
 
 StatsStatus fishertest(f64 a, f64 b, f64 c, f64 d, f64 alpha, TestTail tail, FisherTestResult& out,
                        Allocator* alloc) {
+    if (!is_finite(a) || !is_finite(b) || !is_finite(c) || !is_finite(d) || a < 0.0 || b < 0.0 ||
+        c < 0.0 || d < 0.0 || floor(a) != a || floor(b) != b || floor(c) != c || floor(d) != d) {
+        return StatsStatus::kInvalidArgument;
+    }
+    if (!(alpha > 0.0 && alpha < 1.0)) {
+        alpha = 0.05;
+    }
     const f64 row1 = a + b;
     const f64 col1 = a + c;
     const f64 ntot = a + b + c + d;
+    if (ntot > 1e8) {
+        return StatsStatus::kInvalidArgument;
+    }
     const i64 kmin = as<i64>(max(0.0, row1 + col1 - ntot));
     const i64 kmax = as<i64>(min(row1, col1));
     const i64 kobs = as<i64>(a);
@@ -757,15 +909,35 @@ StatsStatus fishertest(f64 a, f64 b, f64 c, f64 d, f64 alpha, TestTail tail, Fis
     }
 
     const f64 inf_v = Limits<f64>::infinity();
-    const f64 odds = (b * c == 0.0) ? inf_v : ((a * d) / (b * c));
+    const f64 qnan = Limits<f64>::quiet_nan();
+    const f64 ad = a * d;
+    const f64 bc = b * c;
+    const f64 odds = (bc == 0.0) ? ((ad == 0.0) ? qnan : inf_v) : (ad / bc);
     f64 ci_lo = 0.0;
     f64 ci_hi = inf_v;
     if (a > 0.0 && b > 0.0 && c > 0.0 && d > 0.0) {
         const f64 log_or = log(odds);
         const f64 se = sqrt(1.0 / a + 1.0 / b + 1.0 / c + 1.0 / d);
-        const f64 zcrit = norm_inv(1.0 - 0.5 * alpha, 0.0, 1.0);
-        ci_lo = exp(log_or - zcrit * se);
-        ci_hi = exp(log_or + zcrit * se);
+        switch (tail) {
+            case TestTail::kBoth: {
+                const f64 zcrit = norm_inv(1.0 - 0.5 * alpha, 0.0, 1.0);
+                ci_lo = exp(log_or - zcrit * se);
+                ci_hi = exp(log_or + zcrit * se);
+                break;
+            }
+            case TestTail::kRight: {
+                const f64 zc = norm_inv(1.0 - alpha, 0.0, 1.0);
+                ci_lo = exp(log_or - zc * se);
+                ci_hi = inf_v;
+                break;
+            }
+            case TestTail::kLeft: {
+                const f64 zc = norm_inv(1.0 - alpha, 0.0, 1.0);
+                ci_lo = 0.0;
+                ci_hi = exp(log_or + zc * se);
+                break;
+            }
+        }
     }
     out = FisherTestResult{(p < alpha) ? 1 : 0, p, odds, ci_lo, ci_hi};
     return StatsStatus::kOk;
@@ -847,12 +1019,13 @@ StatsStatus vartestn(ArrayRef<f64> x, ArrayRef<f64> group, VarTestNMethod method
         }
     }
 
+    const usize min_group_sz = (method == VarTestNMethod::kOBrien) ? 3u : 2u;
     Array<usize> ns(scratch.allocator());
     Array<usize> offsets(scratch.allocator());
     Array<f64> data(scratch.allocator());
     offsets.push_back(0);
     for (usize g = 0; g < k_all; ++g) {
-        if (counts[g] < 2) {
+        if (counts[g] < min_group_sz) {
             continue;
         }
         ns.push_back(counts[g]);
@@ -896,10 +1069,23 @@ StatsStatus vartestn(ArrayRef<f64> x, ArrayRef<f64> group, VarTestNMethod method
 
     if (method == VarTestNMethod::kBartlett) {
         f64 sp2_num = 0.0;
+        bool any_zero_var = false;
         for (usize i = 0; i < k; ++i) {
             sp2_num += as<f64>(ns[i] - 1) * vars[i];
+            if (!(vars[i] > 0.0)) {
+                any_zero_var = true;
+            }
         }
+        const f64 df = as<f64>(k - 1);
         const f64 sp2 = sp2_num / as<f64>(total_n - k);
+        if (!(sp2 > 0.0)) {
+            out = VarTestNResult{qnan, qnan, df, qnan};
+            return StatsStatus::kOk;
+        }
+        if (any_zero_var) {
+            out = VarTestNResult{0.0, Limits<f64>::infinity(), df, qnan};
+            return StatsStatus::kOk;
+        }
         f64 q = as<f64>(total_n - k) * log(sp2);
         for (usize i = 0; i < k; ++i) {
             q -= as<f64>(ns[i] - 1) * log(vars[i]);
@@ -910,8 +1096,7 @@ StatsStatus vartestn(ArrayRef<f64> x, ArrayRef<f64> group, VarTestNMethod method
         }
         inv_sum -= 1.0 / as<f64>(total_n - k);
         const f64 c_corr = 1.0 + inv_sum / (3.0 * as<f64>(k - 1));
-        const f64 chisq = q / c_corr;
-        const f64 df = as<f64>(k - 1);
+        const f64 chisq = max(0.0, q / c_corr);
         const f64 p = max(0.0, 1.0 - chi2_cdf(chisq, df));
         out = VarTestNResult{p, chisq, df, qnan};
         return StatsStatus::kOk;
@@ -1474,26 +1659,34 @@ StatsStatus ansaribradley(ArrayRef<f64> x, ArrayRef<f64> y, f64 alpha, TestTail 
 }
 
 StatsStatus lillietest(ArrayRef<f64> x, f64 alpha, LillieTestResult& out, Allocator* alloc) {
-    const usize n = x.size();
-    if (n < 4 || alpha <= 0.0 || alpha >= 1.0) {
+    if (!(alpha > 0.0 && alpha < 1.0)) {
         return StatsStatus::kInvalidArgument;
     }
 
     ArenaTemp scratch = get_scratch(alloc);
-    Array<f64> xs(x, scratch.allocator());
+    Array<f64> xs(scratch.allocator());
+    xs.reserve(x.size());
+    for (usize i = 0; i < x.size(); ++i) {
+        if (!is_nan(x[i])) {
+            xs.push_back(x[i]);
+        }
+    }
+    const usize n = xs.size();
+    if (n < 4) {
+        return StatsStatus::kInvalidArgument;
+    }
     sort(xs.as_mut_ref());
 
     f64 mean_v = 0.0;
     f64 var_v = 0.0;
-    sample_mean_var(xs.as_ref(), mean_v, var_v);
+    (void)sample_mean_var(xs.as_ref(), mean_v, var_v);
     const f64 sd = sqrt(var_v);
-    if (sd == 0.0) {
+    if (!(sd > 0.0) || !is_finite(sd)) {
         return StatsStatus::kSingularMatrix;
     }
 
     f64 d_stat = 0.0;
     const f64 dn = as<f64>(n);
-    constexpr f64 kInvSqrt2 = 0.7071067811865476;
     for (usize i = 0; i < n; ++i) {
         const f64 z = (xs[i] - mean_v) / sd;
         const f64 f_val = 0.5 * (1.0 + specfun::erf(z * kInvSqrt2));
@@ -1533,16 +1726,20 @@ StatsStatus lillietest(ArrayRef<f64> x, f64 alpha, LillieTestResult& out, Alloca
             f64 a;
             f64 ds;
         };
-        static constexpr Pt kTbl[5] = {
-            {0.20, 0.741}, {0.15, 0.775}, {0.10, 0.819}, {0.05, 0.895}, {0.01, 1.035},
+        static constexpr Pt kTbl[6] = {
+            {0.50, 0.474}, {0.20, 0.741}, {0.15, 0.775},
+            {0.10, 0.819}, {0.05, 0.895}, {0.01, 1.035},
         };
-        for (usize k = 1; k < 5; ++k) {
+        if (a >= kTbl[0].a) {
+            return kTbl[0].ds;
+        }
+        for (usize k = 1; k < 6; ++k) {
             if (a >= kTbl[k].a) {
                 const f64 frac = (a - kTbl[k - 1].a) / (kTbl[k].a - kTbl[k - 1].a);
                 return kTbl[k - 1].ds + frac * (kTbl[k].ds - kTbl[k - 1].ds);
             }
         }
-        return kTbl[4].ds;
+        return kTbl[5].ds;
     };
 
     const f64 p_val = clamp(stephens_p(d_star), 1e-10, 0.5);

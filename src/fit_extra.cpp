@@ -6,21 +6,37 @@
 #include "keel/stats.h"
 
 #include "keel/math.h"
+#include "keel/specfun.h"
 
 namespace keel::stats {
 
 namespace {
 
 constexpr f64 kLog2Pi = 1.8378770664093454835606594728112352;
+constexpr f64 kSqrt2OverPi = 0.7978845608028653558798921198687637;
 
 inline f64 qnan() noexcept { return Limits<f64>::quiet_nan(); }
 inline f64 pinf() noexcept { return Limits<f64>::infinity(); }
 
 // Inverse Mills ratio lambda(a) = phi(a) / Phi(-a) for right-censored normal MLE.
+// Uses erfcx(a / sqrt(2)) for a >= 0 so extreme right tails never underflow to 0/0.
 inline f64 inv_mills(f64 a) noexcept {
+    if (a >= 0.0) {
+        const f64 ex = specfun::erfcx(a * kInvSqrt2);
+        return (ex > 0.0) ? (kSqrt2OverPi / ex) : (a + 1.0 / a);
+    }
     const f64 pdf = kInvSqrt2Pi * exp(-0.5 * a * a);
-    const f64 surv = 0.5 * erfc(a * kInvSqrt2);
-    return (surv > 1e-300) ? (pdf / surv) : 0.0;
+    const f64 surv = 0.5 * specfun::erfc(a * kInvSqrt2);
+    return (surv > 0.0) ? (pdf / surv) : 0.0;
+}
+
+// -log(Phi(-z)) = -log(0.5 * erfc(z / sqrt(2))) without underflow in the right tail.
+inline f64 neg_log_norm_surv(f64 z) noexcept {
+    if (z <= 0.0) {
+        return -log(0.5 * specfun::erfc(z * kInvSqrt2));
+    }
+    const f64 ex = specfun::erfcx(z * kInvSqrt2);
+    return 0.5 * z * z - log(0.5 * ex);
 }
 
 inline f64 z_norm_crit(f64 alpha) noexcept {
@@ -38,7 +54,7 @@ StatsStatus normfit(ArrayRef<f64> x, ArrayRef<u8> cens, ArrayRef<f64> freq, f64 
     const f64 nanv = qnan();
     out = {nanv, nanv, nanv, nanv, nanv, nanv};
     const usize n = x.size();
-    if (n == 0) {
+    if (n == 0 || !(alpha > 0.0 && alpha < 1.0)) {
         return StatsStatus::kInvalidArgument;
     }
     if (!cens.empty() && cens.size() != n) {
@@ -46,6 +62,14 @@ StatsStatus normfit(ArrayRef<f64> x, ArrayRef<u8> cens, ArrayRef<f64> freq, f64 
     }
     if (!freq.empty() && freq.size() != n) {
         return StatsStatus::kInvalidArgument;
+    }
+    for (usize i = 0; i < n; ++i) {
+        if (!is_finite(x[i])) {
+            return StatsStatus::kInvalidArgument;
+        }
+        if (!freq.empty() && (!(freq[i] >= 0.0) || !is_finite(freq[i]))) {
+            return StatsStatus::kInvalidArgument;
+        }
     }
     if (n == 1) {
         out.p1 = x[0];
@@ -60,7 +84,7 @@ StatsStatus normfit(ArrayRef<f64> x, ArrayRef<u8> cens, ArrayRef<f64> freq, f64 
     for (usize i = 0; i < n; ++i) {
         const f64 fi = has_f ? freq[i] : 1.0;
         sumf += fi;
-        if (!(has_c && cens[i] != 0)) {
+        if (!(has_c && cens[i] != 0) && fi > 0.0) {
             ++nuncens;
         }
     }
@@ -68,7 +92,16 @@ StatsStatus normfit(ArrayRef<f64> x, ArrayRef<u8> cens, ArrayRef<f64> freq, f64 
         return StatsStatus::kInvalidArgument;
     }
 
-    const bool any_cens = (nuncens != n);
+    bool any_cens = false;
+    if (has_c) {
+        for (usize i = 0; i < n; ++i) {
+            const f64 fi = has_f ? freq[i] : 1.0;
+            if (cens[i] != 0 && fi > 0.0) {
+                any_cens = true;
+                break;
+            }
+        }
+    }
     if (!any_cens) {
         f64 s = 0.0;
         for (usize i = 0; i < n; ++i) {
@@ -195,7 +228,7 @@ StatsStatus expfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 
     const f64 nanv = qnan();
     out = {nanv, nanv, nanv};
     const usize n = x.size();
-    if (n == 0) {
+    if (n == 0 || !(alpha > 0.0 && alpha < 1.0)) {
         return StatsStatus::kInvalidArgument;
     }
     if (!cens.empty() && cens.size() != n) {
@@ -209,8 +242,14 @@ StatsStatus expfit(ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq, f64 
     f64 total_t = 0.0;
     f64 events_d = 0.0;
     for (usize i = 0; i < n; ++i) {
+        if (!(x[i] >= 0.0) || !is_finite(x[i])) {
+            return StatsStatus::kInvalidArgument;
+        }
         const f64 fi = has_f ? freq[i] : 1.0;
-        const f64 ci = has_c ? cens[i] : 0.0;
+        if (!(fi >= 0.0) || !is_finite(fi)) {
+            return StatsStatus::kInvalidArgument;
+        }
+        const f64 ci = (has_c && cens[i] != 0.0) ? 1.0 : 0.0;
         total_t += fi * x[i];
         events_d += fi * (1.0 - ci);
     }
@@ -231,11 +270,14 @@ StatsStatus poissfit(ArrayRef<f64> x, f64 alpha, Fit1Result& out) noexcept {
     const f64 nanv = qnan();
     out = {nanv, nanv, nanv};
     const usize n = x.size();
-    if (n == 0) {
+    if (n == 0 || !(alpha > 0.0 && alpha < 1.0)) {
         return StatsStatus::kInvalidArgument;
     }
     f64 s = 0.0;
     for (usize i = 0; i < n; ++i) {
+        if (!(x[i] >= 0.0) || !is_finite(x[i])) {
+            return StatsStatus::kInvalidArgument;
+        }
         s += x[i];
     }
     const f64 nd = as<f64>(n);
@@ -249,12 +291,18 @@ StatsStatus unifit(ArrayRef<f64> x, f64 alpha, Fit2Result& out) noexcept {
     const f64 nanv = qnan();
     out = {nanv, nanv, nanv, nanv, nanv, nanv};
     const usize n = x.size();
-    if (n == 0) {
+    if (n == 0 || !(alpha > 0.0 && alpha < 1.0)) {
+        return StatsStatus::kInvalidArgument;
+    }
+    if (!is_finite(x[0])) {
         return StatsStatus::kInvalidArgument;
     }
     f64 mn = x[0];
     f64 mx = mn;
     for (usize i = 1; i < n; ++i) {
+        if (!is_finite(x[i])) {
+            return StatsStatus::kInvalidArgument;
+        }
         if (x[i] < mn) {
             mn = x[i];
         }
@@ -274,7 +322,8 @@ StatsStatus unifit(ArrayRef<f64> x, f64 alpha, Fit2Result& out) noexcept {
 
 StatsStatus binofit_scalar(f64 k, f64 n, f64 alpha, Fit1Result& out) noexcept {
     const f64 nanv = qnan();
-    if (!(n > 0.0)) {
+    if (!(n > 0.0) || !is_finite(n) || floor(n) != n || !(k >= 0.0 && k <= n) ||
+        !is_finite(k) || floor(k) != k || !(alpha > 0.0 && alpha < 1.0)) {
         out = {nanv, nanv, nanv};
         return StatsStatus::kInvalidArgument;
     }
@@ -288,11 +337,14 @@ StatsStatus raylfit(ArrayRef<f64> x, f64 alpha, Fit1Result& out) noexcept {
     const f64 nanv = qnan();
     out = {nanv, nanv, nanv};
     const usize n = x.size();
-    if (n == 0) {
+    if (n == 0 || !(alpha > 0.0 && alpha < 1.0)) {
         return StatsStatus::kInvalidArgument;
     }
     f64 s2 = 0.0;
     for (usize i = 0; i < n; ++i) {
+        if (!(x[i] >= 0.0) || !is_finite(x[i])) {
+            return StatsStatus::kInvalidArgument;
+        }
         s2 += x[i] * x[i];
     }
     const f64 two_n = 2.0 * as<f64>(n);
@@ -314,7 +366,7 @@ f64 normlike(f64 mu, f64 sigma, ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f6
     if (n == 0) {
         return 0.0;
     }
-    if (!(sigma > 0.0)) {
+    if (!(sigma > 0.0) || is_nan(mu)) {
         return qnan();
     }
     const bool use_c = !cens.empty();
@@ -339,9 +391,7 @@ f64 normlike(f64 mu, f64 sigma, ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f6
         const f64 d = xi - mu;
         const bool is_cens = use_c && (cens[i] != 0.0);
         if (is_cens) {
-            const f64 z = d * inv_s;
-            const f64 s = 0.5 * erfc(z * kInvSqrt2);
-            nl += w * (-log(s));
+            nl += w * neg_log_norm_surv(d * inv_s);
         } else {
             nl += w * (log_s + half_log2pi + d * d * inv_2s2);
         }
@@ -386,8 +436,14 @@ f64 explike(f64 mu, ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64> freq,
         if (w == 0.0) {
             continue;
         }
-        any = true;
         const f64 xi = x[i];
+        if (!(xi >= 0.0)) {
+            if (avar_out) {
+                *avar_out = nanv;
+            }
+            return nanv;
+        }
+        any = true;
         const bool is_cens = use_c && (cens[i] != 0.0);
         if (is_cens) {
             nl += w * (xi * inv_mu);
@@ -418,7 +474,7 @@ f64 lognlike(f64 mu, f64 sigma, ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f6
         set_avar_nan();
         return 0.0;
     }
-    if (!(sigma > 0.0)) {
+    if (!(sigma > 0.0) || is_nan(mu)) {
         set_avar_nan();
         return nanv;
     }
@@ -463,10 +519,8 @@ f64 lognlike(f64 mu, f64 sigma, ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f6
             i11 += w * (-inv_s2 + 3.0 * d * d * inv_s4);
             i01 += w * 2.0 * d * inv_s3;
         } else {
-            const f64 surv = 0.5 * erfc(z * kInvSqrt2);
-            nl += w * (-log(surv));
-            const f64 phi = kInvSqrt2Pi * exp(-0.5 * z * z);
-            const f64 h = phi / surv;
+            nl += w * neg_log_norm_surv(z);
+            const f64 h = inv_mills(z);
             const f64 hp = h * (h - z);
             i00 += w * hp * inv_s2;
             i11 += w * (2.0 * z * h + z * z * hp) * inv_s2;
@@ -503,6 +557,9 @@ f64 gamlike(f64 a, f64 b, ArrayRef<f64> x) noexcept {
     f64 sum_log_x = 0.0;
     f64 sx = 0.0;
     for (usize i = 0; i < n; ++i) {
+        if (is_nan(x[i])) {
+            return qnan();
+        }
         if (x[i] <= 0.0) {
             return pinf();
         }
@@ -510,7 +567,7 @@ f64 gamlike(f64 a, f64 b, ArrayRef<f64> x) noexcept {
         sx += x[i];
     }
     const f64 nd = as<f64>(n);
-    return -(a - 1.0) * sum_log_x + sx / b + nd * a * log(b) + nd * lgamma(a);
+    return -(a - 1.0) * sum_log_x + sx / b + nd * a * log(b) + nd * specfun::gammaln(a);
 }
 
 f64 betalike(f64 a, f64 b, ArrayRef<f64> x) noexcept {
@@ -524,13 +581,13 @@ f64 betalike(f64 a, f64 b, ArrayRef<f64> x) noexcept {
     f64 sum_log = 0.0;
     f64 sum_log1m = 0.0;
     for (usize i = 0; i < n; ++i) {
-        if (x[i] <= 0.0 || x[i] >= 1.0) {
+        if (!(x[i] > 0.0 && x[i] < 1.0)) {
             return qnan();
         }
         sum_log += log(x[i]);
         sum_log1m += log1p(-x[i]);
     }
-    const f64 log_beta = lgamma(a) + lgamma(b) - lgamma(a + b);
+    const f64 log_beta = specfun::betaln(a, b);
     return -(a - 1.0) * sum_log - (b - 1.0) * sum_log1m + as<f64>(n) * log_beta;
 }
 
@@ -576,7 +633,7 @@ f64 evlike(f64 mu, f64 sigma, ArrayRef<f64> x, ArrayRef<f64> cens, ArrayRef<f64>
     if (n == 0) {
         return 0.0;
     }
-    if (!(sigma > 0.0)) {
+    if (!(sigma > 0.0) || is_nan(mu)) {
         return qnan();
     }
     const bool use_c = !cens.empty();
@@ -613,13 +670,16 @@ f64 gevlike(f64 k, f64 sigma, f64 mu, ArrayRef<f64> x) noexcept {
     if (n == 0) {
         return pinf();
     }
-    if (!(sigma > 0.0)) {
+    if (!(sigma > 0.0) || is_nan(k) || is_nan(mu)) {
         return qnan();
     }
     if (k == 0.0) {
         f64 sz = 0.0;
         f64 sexp = 0.0;
         for (usize i = 0; i < n; ++i) {
+            if (is_nan(x[i])) {
+                return qnan();
+            }
             const f64 z = (x[i] - mu) / sigma;
             sz += z;
             sexp += exp(-z);
@@ -629,13 +689,17 @@ f64 gevlike(f64 k, f64 sigma, f64 mu, ArrayRef<f64> x) noexcept {
     f64 slog_t = 0.0;
     f64 st_invk = 0.0;
     for (usize i = 0; i < n; ++i) {
-        const f64 z = (x[i] - mu) / sigma;
-        const f64 t = 1.0 + k * z;
-        if (t <= 0.0) {
+        if (is_nan(x[i])) {
             return qnan();
         }
-        slog_t += log(t);
-        st_invk += pow(t, -1.0 / k);
+        const f64 z = (x[i] - mu) / sigma;
+        const f64 kz = k * z;
+        if (kz <= -1.0) {
+            return pinf();
+        }
+        const f64 lt = log1p(kz);
+        slog_t += lt;
+        st_invk += exp(-lt / k);
     }
     return as<f64>(n) * log(sigma) + (1.0 / k + 1.0) * slog_t + st_invk;
 }
@@ -645,26 +709,35 @@ f64 gplike(f64 k, f64 sigma, ArrayRef<f64> x) noexcept {
     if (n == 0) {
         return pinf();
     }
-    if (sigma == 0.0 || is_nan(sigma)) {
+    if (!(sigma > 0.0) || is_nan(k)) {
         return qnan();
-    }
-    if (sigma < 0.0) {
-        return -pinf();
     }
     if (k == 0.0) {
         f64 sx = 0.0;
         for (usize i = 0; i < n; ++i) {
+            if (is_nan(x[i])) {
+                return qnan();
+            }
+            if (x[i] < 0.0) {
+                return pinf();
+            }
             sx += x[i];
         }
         return as<f64>(n) * log(sigma) + sx / sigma;
     }
     f64 slog_t = 0.0;
     for (usize i = 0; i < n; ++i) {
-        const f64 t = 1.0 + k * x[i] / sigma;
-        if (t <= 0.0) {
+        if (is_nan(x[i])) {
+            return qnan();
+        }
+        if (x[i] < 0.0) {
             return pinf();
         }
-        slog_t += log(t);
+        const f64 kz = k * x[i] / sigma;
+        if (kz <= -1.0) {
+            return pinf();
+        }
+        slog_t += log1p(kz);
     }
     return as<f64>(n) * log(sigma) + (1.0 / k + 1.0) * slog_t;
 }

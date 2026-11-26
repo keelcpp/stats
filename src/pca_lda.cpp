@@ -10,12 +10,16 @@ namespace {
 
 constexpr f64 kLog2Pi = 1.8378770664093454835606594728112352;
 
+inline bool mul_overflows(usize a, usize b) noexcept {
+    return a != 0u && b > Limits<usize>::kMax / a;
+}
+
 bool cholesky_col(const f64* M, f64* L, usize d) noexcept {
     for (usize i = 0; i < d * d; ++i) L[i] = 0.0;
     for (usize j = 0; j < d; ++j) {
         f64 s = M[j + j * d];
         for (usize k = 0; k < j; ++k) s -= L[j + k * d] * L[j + k * d];
-        if (!(s > 0.0)) return false;
+        if (!(s > 0.0) || !is_finite(s)) return false;
         const f64 ljj = sqrt(s);
         L[j + j * d] = ljj;
         for (usize i = j + 1; i < d; ++i) {
@@ -70,12 +74,15 @@ void proj_psd(ArrayRef<f64> M, usize n, MutArrayRef<f64> X, Allocator* alloc) {
 
 StatsStatus pcacov(ArrayRef<f64> c_col_major, usize d, MutArrayRef<f64> out_coeff_col_major,
                    MutArrayRef<f64> out_latent, MutArrayRef<f64> out_explained, Allocator* alloc) {
-    if (d == 0 || c_col_major.size() != d * d || out_coeff_col_major.size() != d * d ||
-        out_latent.size() != d) {
+    if (d == 0 || mul_overflows(d, d) || c_col_major.size() != d * d ||
+        out_coeff_col_major.size() != d * d || out_latent.size() != d) {
         return StatsStatus::kInvalidArgument;
     }
     if (!out_explained.empty() && out_explained.size() != d) {
         return StatsStatus::kInvalidArgument;
+    }
+    for (usize i = 0; i < d * d; ++i) {
+        if (!is_finite(c_col_major[i])) return StatsStatus::kInvalidArgument;
     }
 
     Array<f64> sym(d * d, 0.0, alloc);
@@ -97,8 +104,19 @@ StatsStatus pcacov(ArrayRef<f64> c_col_major, usize d, MutArrayRef<f64> out_coef
         const usize src = order[col];
         out_latent[col] = evals[src];
         total += evals[src];
+        // Enforce deterministic sign convention: largest-magnitude entry in each column is positive.
+        f64 max_abs = -1.0;
+        f64 sign = 1.0;
         for (usize r = 0; r < d; ++r) {
-            out_coeff_col_major[r + col * d] = V[r + src * d];
+            const f64 v = V[r + src * d];
+            const f64 av = abs(v);
+            if (av > max_abs) {
+                max_abs = av;
+                sign = (v < 0.0) ? -1.0 : 1.0;
+            }
+        }
+        for (usize r = 0; r < d; ++r) {
+            out_coeff_col_major[r + col * d] = sign * V[r + src * d];
         }
     }
     if (!out_explained.empty()) {
@@ -115,7 +133,8 @@ StatsStatus pca(ArrayRef<f64> x_col_major, usize n, usize d, MutArrayRef<f64> ou
                 MutArrayRef<f64> out_score_col_major, MutArrayRef<f64> out_latent,
                 MutArrayRef<f64> out_tsq, MutArrayRef<f64> out_explained, MutArrayRef<f64> out_mu,
                 Allocator* alloc) {
-    if (n < 2 || d == 0 || x_col_major.size() != n * d || out_coeff_col_major.size() != d * d ||
+    if (n < 2 || d == 0 || mul_overflows(n, d) || mul_overflows(d, d) ||
+        x_col_major.size() != n * d || out_coeff_col_major.size() != d * d ||
         out_latent.size() != d) {
         return StatsStatus::kInvalidArgument;
     }
@@ -125,6 +144,9 @@ StatsStatus pca(ArrayRef<f64> x_col_major, usize n, usize d, MutArrayRef<f64> ou
     if (!out_tsq.empty() && out_tsq.size() != n) return StatsStatus::kInvalidArgument;
     if (!out_explained.empty() && out_explained.size() != d) return StatsStatus::kInvalidArgument;
     if (!out_mu.empty() && out_mu.size() != d) return StatsStatus::kInvalidArgument;
+    for (usize i = 0; i < n * d; ++i) {
+        if (!is_finite(x_col_major[i])) return StatsStatus::kInvalidArgument;
+    }
 
     Array<f64> mu(d, 0.0, alloc);
     for (usize c = 0; c < d; ++c) {
@@ -155,6 +177,20 @@ StatsStatus pca(ArrayRef<f64> x_col_major, usize n, usize d, MutArrayRef<f64> ou
         pcacov(cov.as_ref(), d, out_coeff_col_major, out_latent, out_explained, alloc);
     if (st != StatsStatus::kOk) return st;
 
+    // Sample covariance is PSD; clamp tiny numerical negative eigenvalues to 0.
+    f64 total = 0.0;
+    for (usize k = 0; k < d; ++k) {
+        if (out_latent[k] < 0.0) out_latent[k] = 0.0;
+        total += out_latent[k];
+    }
+    if (!out_explained.empty()) {
+        if (total > 0.0) {
+            for (usize k = 0; k < d; ++k) out_explained[k] = 100.0 * out_latent[k] / total;
+        } else {
+            for (usize k = 0; k < d; ++k) out_explained[k] = 0.0;
+        }
+    }
+
     const bool need_score = !out_score_col_major.empty() || !out_tsq.empty();
     if (need_score) {
         Array<f64> score_tmp(alloc);
@@ -171,10 +207,12 @@ StatsStatus pca(ArrayRef<f64> x_col_major, usize n, usize d, MutArrayRef<f64> ou
             }
         }
         if (!out_tsq.empty()) {
+            const f64 lat_tol =
+                max(1e-15, out_latent[0] * as<f64>(max(n, d)) * Limits<f64>::kEpsilon);
             for (usize r = 0; r < n; ++r) {
                 f64 s = 0.0;
                 for (usize k = 0; k < d; ++k) {
-                    if (out_latent[k] > 1e-15) {
+                    if (out_latent[k] > lat_tol) {
                         const f64 sc = score[r + k * n];
                         s += (sc * sc) / out_latent[k];
                     }
@@ -189,7 +227,7 @@ StatsStatus pca(ArrayRef<f64> x_col_major, usize n, usize d, MutArrayRef<f64> ou
 StatsStatus pcares(ArrayRef<f64> x_col_major, usize n, usize d, usize ndim,
                    MutArrayRef<f64> out_res_col_major, MutArrayRef<f64> out_recon_col_major,
                    Allocator* alloc) {
-    if (n < 2 || d == 0 || ndim > d || x_col_major.size() != n * d ||
+    if (n < 2 || d == 0 || ndim > d || mul_overflows(n, d) || x_col_major.size() != n * d ||
         out_res_col_major.size() != n * d || out_recon_col_major.size() != n * d) {
         return StatsStatus::kInvalidArgument;
     }
@@ -219,9 +257,16 @@ StatsStatus lda_classify(ArrayRef<f64> sample_col_major, usize n_samp,
                          ArrayRef<f64> training_col_major, usize n_tr, usize d,
                          ArrayRef<f64> group_labels, DiscrimType type, LdaResult& out,
                          Allocator* alloc) {
-    if (n_tr == 0 || d == 0 || training_col_major.size() != n_tr * d ||
+    if (n_tr == 0 || d == 0 || mul_overflows(n_tr, d) || mul_overflows(n_samp, d) ||
+        mul_overflows(d, d) || training_col_major.size() != n_tr * d ||
         sample_col_major.size() != n_samp * d || group_labels.size() != n_tr) {
         return StatsStatus::kInvalidArgument;
+    }
+    for (usize i = 0; i < n_tr; ++i) {
+        if (!is_finite(group_labels[i])) return StatsStatus::kInvalidArgument;
+    }
+    for (usize i = 0; i < n_tr * d; ++i) {
+        if (!is_finite(training_col_major[i])) return StatsStatus::kInvalidArgument;
     }
 
     const bool quadratic =
@@ -369,18 +414,28 @@ StatsStatus lda_classify(ArrayRef<f64> sample_col_major, usize n_samp,
 
 StatsStatus nearcorr(ArrayRef<f64> a_col_major, usize n, ArrayRef<f64> w_scale_col_major, f64 tol,
                      i64 max_iter, MutArrayRef<f64> out_col_major, Allocator* alloc) {
-    if (n == 0 || a_col_major.size() != n * n || out_col_major.size() != n * n || !(tol > 0.0) ||
-        max_iter < 0) {
+    if (n == 0 || mul_overflows(n, n) || a_col_major.size() != n * n ||
+        out_col_major.size() != n * n || !(tol > 0.0) || max_iter < 0) {
         return StatsStatus::kInvalidArgument;
     }
+    const usize nn = n * n;
+    for (usize k = 0; k < nn; ++k) {
+        if (!is_finite(a_col_major[k])) return StatsStatus::kInvalidArgument;
+    }
     const bool has_weights = !w_scale_col_major.empty();
-    if (has_weights && w_scale_col_major.size() != n * n) return StatsStatus::kInvalidArgument;
+    if (has_weights) {
+        if (w_scale_col_major.size() != nn) return StatsStatus::kInvalidArgument;
+        for (usize k = 0; k < nn; ++k) {
+            if (!(w_scale_col_major[k] > 0.0) || !is_finite(w_scale_col_major[k])) {
+                return StatsStatus::kInvalidArgument;
+            }
+        }
+    }
     if (n == 1) {
         out_col_major[0] = 1.0;
         return StatsStatus::kOk;
     }
 
-    const usize nn = n * n;
     Array<f64> y_old(nn, 0.0, alloc);
     Array<f64> x_old(nn, 0.0, alloc);
     Array<f64> dS(nn, 0.0, alloc);
@@ -414,8 +469,8 @@ StatsStatus nearcorr(ArrayRef<f64> a_col_major, usize n, ArrayRef<f64> w_scale_c
         }
         for (usize i = 0; i < n; ++i) Y[i + i * n] = 1.0;
 
-        const f64 norm_y = frob_norm(Y.as_ref());
-        const f64 norm_x = frob_norm(X.as_ref());
+        const f64 norm_y = max(frob_norm(Y.as_ref()), 1e-300);
+        const f64 norm_x = max(frob_norm(X.as_ref()), 1e-300);
         for (usize k = 0; k < nn; ++k) {
             d1[k] = Y[k] - y_old[k];
             d2[k] = X[k] - x_old[k];
@@ -430,11 +485,18 @@ StatsStatus nearcorr(ArrayRef<f64> a_col_major, usize n, ArrayRef<f64> w_scale_c
     }
 
     Array<f64> dd(n, 0.0, alloc);
-    for (usize i = 0; i < n; ++i) dd[i] = x_old[i + i * n];
+    for (usize i = 0; i < n; ++i) dd[i] = max(x_old[i + i * n], 0.0);
     for (usize j = 0; j < n; ++j) {
         for (usize i = 0; i < n; ++i) {
-            const f64 denom = sqrt(dd[i] * dd[j]);
-            out_col_major[i + j * n] = 0.5 * (x_old[i + j * n] + x_old[j + i * n]) / denom;
+            if (i == j) {
+                out_col_major[i + j * n] = 1.0;
+            } else {
+                const f64 denom = sqrt(dd[i] * dd[j]);
+                out_col_major[i + j * n] =
+                    (denom > 0.0) ? clamp(0.5 * (x_old[i + j * n] + x_old[j + i * n]) / denom,
+                                          -1.0, 1.0)
+                                  : 0.0;
+            }
         }
     }
     return StatsStatus::kOk;

@@ -18,7 +18,7 @@ if(NOT TARGET keel::keel)
     FetchContent_Declare(
         keel
         GIT_REPOSITORY https://github.com/keelcpp/keel.git
-        GIT_TAG        5d80fa7d6984e7325fc8d5317c5db13830381429
+        GIT_TAG        4b37783925fe7af7a64daaff90f268df267fbbf3
     )
     FetchContent_MakeAvailable(keel)
 endif()
@@ -41,7 +41,7 @@ if(NOT TARGET keel::specfun)
     FetchContent_Declare(
         keel_specfun
         GIT_REPOSITORY https://github.com/keelcpp/specfun.git
-        GIT_TAG        243bfb4da65004dc0a8bc76e20eed6f16f08d470
+        GIT_TAG        58a88779d8f8d8a6602685201ac0397f0285a869
     )
     FetchContent_MakeAvailable(keel_specfun)
 endif()
@@ -64,7 +64,7 @@ if(NOT TARGET keel::linalg)
     FetchContent_Declare(
         keel_linalg
         GIT_REPOSITORY https://github.com/keelcpp/linalg.git
-        GIT_TAG        33c5027db12fe6c7de73abcc8a22278694a021cb
+        GIT_TAG        1bc2798c7905a9431285c1d2617f619233c43640
     )
     FetchContent_MakeAvailable(keel_linalg)
 endif()
@@ -87,7 +87,7 @@ if(NOT TARGET keel::random)
     FetchContent_Declare(
         keel_random
         GIT_REPOSITORY https://github.com/keelcpp/random.git
-        GIT_TAG        4d2b805928c8cb2cdf36aaf7411f8b08a816c2ab
+        GIT_TAG        cf2615e70e9ba7fc34f7dc9f3f030e8a487245f2
     )
     FetchContent_MakeAvailable(keel_random)
 endif()

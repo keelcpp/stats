@@ -9,6 +9,10 @@ namespace keel::stats {
 
 namespace {
 
+inline bool mul_overflows(usize a, usize b) noexcept {
+    return a != 0u && b > Limits<usize>::kMax / a;
+}
+
 inline f64 soft_threshold(f64 z, f64 g) noexcept {
     if (z > g) return z - g;
     if (z < -g) return z + g;
@@ -40,11 +44,22 @@ bool coord_descent_sweep(ArrayRef<f64> xs, usize n, usize p, MutArrayRef<f64> r,
     f64 max_change = 0.0;
     const f64 fn = as<f64>(n);
     for (usize j = 0; j < p; ++j) {
+        const f64 denom = xj_norm_sq[j] / fn + lambda_l2;
+        if (!(denom > 0.0) || xj_norm_sq[j] == 0.0) {
+            const f64 old_b = beta[j];
+            if (old_b != 0.0) {
+                for (usize i = 0; i < n; ++i) r[i] += old_b * xs[j * n + i];
+                beta[j] = 0.0;
+                const f64 ad = keel::abs(old_b);
+                if (ad > max_change) max_change = ad;
+            }
+            continue;
+        }
         const f64 old_b = beta[j];
         f64 xr = 0.0;
         for (usize i = 0; i < n; ++i) xr += xs[j * n + i] * r[i];
         const f64 z = xr + xj_norm_sq[j] * old_b;
-        const f64 new_b = soft_threshold(z / fn, lambda_eff) / (xj_norm_sq[j] / fn + lambda_l2);
+        const f64 new_b = soft_threshold(z / fn, lambda_eff) / denom;
         beta[j] = new_b;
         const f64 delta = new_b - old_b;
         if (delta != 0.0) {
@@ -66,7 +81,7 @@ inline f64 inv_link(f64 e, GlmFamily fam) noexcept {
             return ex / (1.0 + ex);
         }
         case GlmFamily::kPoisson:
-            return keel::exp(e);
+            return keel::exp(clamp(e, -500.0, 500.0));
     }
     return e;
 }
@@ -104,7 +119,7 @@ inline f64 init_mu(f64 yi, GlmFamily fam) noexcept {
         case GlmFamily::kNormal:
             return yi;
         case GlmFamily::kBinomial:
-            return 0.5 * (yi + 0.5);
+            return 0.5 * (clamp(yi, 0.0, 1.0) + 0.5);
         case GlmFamily::kPoisson:
             return keel::max(yi + 0.1, 0.1);
     }
@@ -117,9 +132,13 @@ StatsStatus lasso(ArrayRef<f64> x_col_major, usize n, usize p, ArrayRef<f64> y,
                   ArrayRef<f64> lambdas, f64 alpha, MutArrayRef<f64> out_b_col_major,
                   MutArrayRef<f64> out_intercept, Allocator* alloc) {
     const usize nl = lambdas.size();
-    if (alpha < 0.0 || alpha > 1.0 || n == 0u || nl == 0u || x_col_major.size() < n * p ||
-        y.size() != n || out_b_col_major.size() < p * nl || out_intercept.size() < nl) {
+    if (!(alpha >= 0.0 && alpha <= 1.0) || n == 0u || nl == 0u || mul_overflows(n, p) ||
+        mul_overflows(p, nl) || x_col_major.size() < n * p || y.size() != n ||
+        out_b_col_major.size() < p * nl || out_intercept.size() < nl) {
         return StatsStatus::kInvalidArgument;
+    }
+    for (usize i = 0; i < nl; ++i) {
+        if (!(lambdas[i] >= 0.0) || !is_finite(lambdas[i])) return StatsStatus::kInvalidArgument;
     }
 
     ArenaTemp scratch = get_scratch(alloc);
@@ -144,7 +163,7 @@ StatsStatus lasso(ArrayRef<f64> x_col_major, usize n, usize p, ArrayRef<f64> y,
 
     Array<usize> idx(nl, 0u, scratch.allocator());
     for (usize i = 0; i < nl; ++i) idx[i] = i;
-    keel::sort(idx.as_mut_ref(), [&](usize a, usize b) { return lambdas[a] > lambdas[b]; });
+    keel::sort(idx.as_mut_ref(), [&](usize a, usize b) noexcept { return lambdas[a] > lambdas[b]; });
 
     Array<f64> beta(p, 0.0, scratch.allocator());
     Array<f64> r = Array<f64>::from(yc.as_ref(), scratch.allocator());
@@ -177,9 +196,13 @@ StatsStatus lassoglm(ArrayRef<f64> x_col_major, usize n, usize p, ArrayRef<f64> 
                      ArrayRef<f64> lambdas, f64 alpha, MutArrayRef<f64> out_b_col_major,
                      MutArrayRef<f64> out_intercept, Allocator* alloc) {
     const usize nl = lambdas.size();
-    if (alpha < 0.0 || alpha > 1.0 || n == 0u || nl == 0u || x_col_major.size() < n * p ||
-        y.size() != n || out_b_col_major.size() < p * nl || out_intercept.size() < nl) {
+    if (!(alpha >= 0.0 && alpha <= 1.0) || n == 0u || nl == 0u || mul_overflows(n, p) ||
+        mul_overflows(p, nl) || x_col_major.size() < n * p || y.size() != n ||
+        out_b_col_major.size() < p * nl || out_intercept.size() < nl) {
         return StatsStatus::kInvalidArgument;
+    }
+    for (usize i = 0; i < nl; ++i) {
+        if (!(lambdas[i] >= 0.0) || !is_finite(lambdas[i])) return StatsStatus::kInvalidArgument;
     }
 
     ArenaTemp scratch = get_scratch(alloc);
@@ -191,7 +214,7 @@ StatsStatus lassoglm(ArrayRef<f64> x_col_major, usize n, usize p, ArrayRef<f64> 
 
     Array<usize> idx(nl, 0u, scratch.allocator());
     for (usize i = 0; i < nl; ++i) idx[i] = i;
-    keel::sort(idx.as_mut_ref(), [&](usize a, usize b) { return lambdas[a] > lambdas[b]; });
+    keel::sort(idx.as_mut_ref(), [&](usize a, usize b) noexcept { return lambdas[a] > lambdas[b]; });
 
     Array<f64> beta(p, 0.0, scratch.allocator());
     Array<f64> mu(n, 0.0, scratch.allocator());
@@ -216,6 +239,7 @@ StatsStatus lassoglm(ArrayRef<f64> x_col_major, usize n, usize p, ArrayRef<f64> 
     Array<f64> z(n, 0.0, scratch.allocator());
     Array<f64> w(n, 0.0, scratch.allocator());
     Array<f64> zc(n, 0.0, scratch.allocator());
+    Array<f64> xbar_w(p, 0.0, scratch.allocator());
     Array<f64> xw(n * p, 0.0, scratch.allocator());
     Array<f64> zw(n, 0.0, scratch.allocator());
     Array<f64> xj_norm(p, 0.0, scratch.allocator());
@@ -240,13 +264,19 @@ StatsStatus lassoglm(ArrayRef<f64> x_col_major, usize n, usize p, ArrayRef<f64> 
                 wsum += w[i];
                 wz += w[i] * z[i];
             }
-            const f64 z_mean = wz / keel::max(wsum, 1e-30);
+            const f64 inv_wsum = 1.0 / keel::max(wsum, 1e-30);
+            const f64 z_mean = wz * inv_wsum;
             for (usize i = 0; i < n; ++i) zc[i] = z[i] - z_mean;
+            for (usize j = 0; j < p; ++j) {
+                f64 wx = 0.0;
+                for (usize i = 0; i < n; ++i) wx += w[i] * xs[j * n + i];
+                xbar_w[j] = wx * inv_wsum;
+            }
 
             for (usize i = 0; i < n; ++i) {
                 const f64 sw = keel::sqrt(w[i]);
                 zw[i] = sw * zc[i];
-                for (usize j = 0; j < p; ++j) xw[j * n + i] = sw * xs[j * n + i];
+                for (usize j = 0; j < p; ++j) xw[j * n + i] = sw * (xs[j * n + i] - xbar_w[j]);
             }
             for (usize j = 0; j < p; ++j) {
                 f64 s = 0.0;
@@ -269,6 +299,7 @@ StatsStatus lassoglm(ArrayRef<f64> x_col_major, usize n, usize p, ArrayRef<f64> 
             }
 
             b0 = z_mean;
+            for (usize j = 0; j < p; ++j) b0 -= beta[j] * xbar_w[j];
             for (usize i = 0; i < n; ++i) {
                 f64 e = b0;
                 for (usize j = 0; j < p; ++j) e += beta[j] * xs[j * n + i];

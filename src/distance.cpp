@@ -9,15 +9,37 @@ namespace keel::stats {
 
 namespace {
 
+inline bool mul_overflows(usize a, usize b) noexcept {
+    return a != 0u && b > Limits<usize>::kMax / a;
+}
+
+inline bool safe_npairs(usize n, usize& out_pairs) noexcept {
+    if (n < 2u) {
+        out_pairs = 0u;
+        return true;
+    }
+    const usize half = (n % 2u == 0u) ? (n / 2u) : ((n - 1u) / 2u);
+    const usize other = (n % 2u == 0u) ? (n - 1u) : n;
+    if (mul_overflows(half, other)) return false;
+    out_pairs = half * other;
+    return true;
+}
+
 inline void read_row(ArrayRef<f64> x_col, usize rows, usize cols, usize r,
                      MutArrayRef<f64> out) noexcept {
     for (usize c = 0; c < cols; ++c) out[c] = x_col[c * rows + r];
 }
 
 bool invert_small(MutArrayRef<f64> a_row_major, usize d, Allocator* alloc) {
+    if (d == 0u) return true;
+    if (mul_overflows(d, 2u * d)) return false;
     Array<f64> aug(d * 2u * d, 0.0, alloc);
     for (usize r = 0; r < d; ++r) {
-        for (usize c = 0; c < d; ++c) aug[r * 2u * d + c] = a_row_major[r * d + c];
+        for (usize c = 0; c < d; ++c) {
+            const f64 v = a_row_major[r * d + c];
+            if (!is_finite(v)) return false;
+            aug[r * 2u * d + c] = v;
+        }
         aug[r * 2u * d + d + r] = 1.0;
     }
     for (usize k = 0; k < d; ++k) {
@@ -30,7 +52,7 @@ bool invert_small(MutArrayRef<f64> a_row_major, usize d, Allocator* alloc) {
                 piv = r;
             }
         }
-        if (pmax < 1e-14) return false;
+        if (!(pmax >= 1e-14)) return false;
         if (piv != k) {
             for (usize c = 0; c < 2u * d; ++c) {
                 keel::swap(aug[k * 2u * d + c], aug[piv * 2u * d + c]);
@@ -93,13 +115,21 @@ void col_std(ArrayRef<f64> x_col, usize rows, usize cols, MutArrayRef<f64> sd_ou
 
 void tiedrank_row(ArrayRef<f64> v, MutArrayRef<f64> r_out, Allocator* alloc) {
     const usize d = v.size();
-    Array<usize> idx(d, 0u, alloc);
-    for (usize k = 0; k < d; ++k) idx[k] = k;
-    keel::sort(idx.as_mut_ref(), [&](usize a, usize b) { return v[a] < v[b]; });
+    Array<usize> idx(alloc);
+    idx.reserve(d);
+    for (usize k = 0; k < d; ++k) {
+        if (is_nan(v[k])) {
+            r_out[k] = Limits<f64>::quiet_nan();
+        } else {
+            idx.push_back(k);
+        }
+    }
+    const usize m = idx.size();
+    keel::sort(idx.as_mut_ref(), [&](usize a, usize b) noexcept { return v[a] < v[b]; });
     usize i = 0u;
-    while (i < d) {
+    while (i < m) {
         usize j = i;
-        while (j + 1u < d && v[idx[j + 1u]] == v[idx[i]]) ++j;
+        while (j + 1u < m && v[idx[j + 1u]] == v[idx[i]]) ++j;
         const f64 avg = 0.5 * (as<f64>(i + 1u) + as<f64>(j + 1u));
         for (usize t = i; t <= j; ++t) r_out[idx[t]] = avg;
         i = j + 1u;
@@ -125,6 +155,7 @@ inline f64 mahal_distance(ArrayRef<f64> u, ArrayRef<f64> v, ArrayRef<f64> cinv,
         for (usize b = 0; b < d; ++b) row += cinv[a * d + b] * diff[b];
         s += diff[a] * row;
     }
+    if (is_nan(s)) return Limits<f64>::quiet_nan();
     return keel::sqrt(s > 0.0 ? s : 0.0);
 }
 
@@ -140,6 +171,7 @@ inline f64 seuclidean_distance(ArrayRef<f64> x, ArrayRef<f64> y,
 
 inline f64 correlation_distance(ArrayRef<f64> x, ArrayRef<f64> y) noexcept {
     const usize d = x.size();
+    if (d == 0u) return Limits<f64>::quiet_nan();
     f64 mx = 0.0;
     f64 my = 0.0;
     for (usize k = 0; k < d; ++k) {
@@ -157,19 +189,30 @@ inline f64 correlation_distance(ArrayRef<f64> x, ArrayRef<f64> y) noexcept {
         yy += dy * dy;
     }
     const f64 denom = keel::sqrt(xx) * keel::sqrt(yy);
-    return (denom > 0.0) ? (1.0 - xy / denom) : Limits<f64>::quiet_nan();
+    if (!(denom > 0.0)) return Limits<f64>::quiet_nan();
+    const f64 dist = 1.0 - xy / denom;
+    return is_nan(dist) ? dist : clamp(dist, 0.0, 2.0);
 }
 
 inline f64 row_distance(ArrayRef<f64> x, ArrayRef<f64> y, DistanceMetric m, f64 p) noexcept {
     const usize d = x.size();
     switch (m) {
         case DistanceMetric::kEuclidean: {
+            f64 scale = 0.0;
+            for (usize k = 0; k < d; ++k) {
+                const f64 ad = keel::abs(x[k] - y[k]);
+                if (is_nan(ad)) return Limits<f64>::quiet_nan();
+                if (ad > scale) scale = ad;
+            }
+            if (scale == 0.0) return 0.0;
+            if (is_inf(scale)) return scale;
+            const f64 inv_s = 1.0 / scale;
             f64 s = 0.0;
             for (usize k = 0; k < d; ++k) {
-                const f64 diff = x[k] - y[k];
+                const f64 diff = (x[k] - y[k]) * inv_s;
                 s += diff * diff;
             }
-            return keel::sqrt(s);
+            return scale * keel::sqrt(s);
         }
         case DistanceMetric::kSqEuclidean: {
             f64 s = 0.0;
@@ -188,14 +231,24 @@ inline f64 row_distance(ArrayRef<f64> x, ArrayRef<f64> y, DistanceMetric m, f64 
             f64 mx = 0.0;
             for (usize k = 0; k < d; ++k) {
                 const f64 diff = keel::abs(x[k] - y[k]);
+                if (is_nan(diff)) return Limits<f64>::quiet_nan();
                 if (diff > mx) mx = diff;
             }
             return mx;
         }
         case DistanceMetric::kMinkowski: {
+            f64 scale = 0.0;
+            for (usize k = 0; k < d; ++k) {
+                const f64 ad = keel::abs(x[k] - y[k]);
+                if (is_nan(ad)) return Limits<f64>::quiet_nan();
+                if (ad > scale) scale = ad;
+            }
+            if (scale == 0.0 || is_inf(scale)) return scale;
+            if (is_inf(p)) return scale;
+            const f64 inv_s = 1.0 / scale;
             f64 s = 0.0;
-            for (usize k = 0; k < d; ++k) s += keel::pow(keel::abs(x[k] - y[k]), p);
-            return keel::pow(s, 1.0 / p);
+            for (usize k = 0; k < d; ++k) s += keel::pow(keel::abs(x[k] - y[k]) * inv_s, p);
+            return scale * keel::pow(s, 1.0 / p);
         }
         case DistanceMetric::kCosine: {
             f64 xy = 0.0, xx = 0.0, yy = 0.0;
@@ -205,29 +258,33 @@ inline f64 row_distance(ArrayRef<f64> x, ArrayRef<f64> y, DistanceMetric m, f64 
                 yy += y[k] * y[k];
             }
             const f64 denom = keel::sqrt(xx) * keel::sqrt(yy);
-            return (denom > 0.0) ? (1.0 - xy / denom) : Limits<f64>::quiet_nan();
+            if (!(denom > 0.0)) return Limits<f64>::quiet_nan();
+            const f64 dist = 1.0 - xy / denom;
+            return is_nan(dist) ? dist : clamp(dist, 0.0, 2.0);
         }
         case DistanceMetric::kCorrelation:
             return correlation_distance(x, y);
         case DistanceMetric::kHamming: {
-            i32 diff = 0;
+            if (d == 0u) return 0.0;
+            usize diff = 0u;
             for (usize k = 0; k < d; ++k) {
                 if (x[k] != y[k]) ++diff;
             }
             return as<f64>(diff) / as<f64>(d);
         }
         case DistanceMetric::kJaccard: {
-            i32 diff = 0;
-            i32 considered = 0;
+            usize diff = 0u;
+            usize considered = 0u;
             for (usize k = 0; k < d; ++k) {
-                const bool xi = (x[k] != 0.0);
-                const bool yi = (y[k] != 0.0);
-                if (xi || yi) {
+                if (is_nan(x[k]) || is_nan(y[k])) return Limits<f64>::quiet_nan();
+                const bool nz = (x[k] != 0.0) || (y[k] != 0.0);
+                if (nz) {
                     ++considered;
-                    if (xi != yi) ++diff;
+                    if (x[k] != y[k]) ++diff;
                 }
             }
-            return (considered > 0) ? (as<f64>(diff) / as<f64>(considered)) : 0.0;
+            return (considered > 0u) ? (as<f64>(diff) / as<f64>(considered))
+                                     : Limits<f64>::quiet_nan();
         }
         case DistanceMetric::kMahalanobis:
         case DistanceMetric::kSeuclidean:
@@ -242,16 +299,22 @@ inline f64 row_distance(ArrayRef<f64> x, ArrayRef<f64> y, DistanceMetric m, f64 
 StatsStatus pdist(ArrayRef<f64> x_col_major, usize rows, usize cols, DistanceMetric metric,
                   f64 minkowski_p, ArrayRef<f64> extra_param, MutArrayRef<f64> out,
                   Allocator* alloc) {
-    if (x_col_major.size() < rows * cols) return StatsStatus::kInvalidArgument;
+    if (mul_overflows(rows, cols) || x_col_major.size() < rows * cols) {
+        return StatsStatus::kInvalidArgument;
+    }
+    if (metric == DistanceMetric::kMinkowski && !(minkowski_p > 0.0)) {
+        return StatsStatus::kInvalidArgument;
+    }
     if (rows < 2u) return StatsStatus::kOk;
-    const usize npairs = rows * (rows - 1u) / 2u;
-    if (out.size() < npairs) return StatsStatus::kInvalidArgument;
+    usize npairs = 0u;
+    if (!safe_npairs(rows, npairs) || out.size() < npairs) return StatsStatus::kInvalidArgument;
 
     ArenaTemp scratch = get_scratch(alloc);
     Array<f64> xi(cols, 0.0, scratch.allocator());
     Array<f64> xj(cols, 0.0, scratch.allocator());
 
     if (metric == DistanceMetric::kMahalanobis) {
+        if (mul_overflows(cols, cols)) return StatsStatus::kInvalidArgument;
         Array<f64> cinv(cols * cols, 0.0, scratch.allocator());
         if (!extra_param.empty()) {
             if (extra_param.size() < cols * cols) return StatsStatus::kInvalidArgument;
@@ -282,11 +345,16 @@ StatsStatus pdist(ArrayRef<f64> x_col_major, usize rows, usize cols, DistanceMet
         Array<f64> inv_scale(cols, 0.0, scratch.allocator());
         if (!extra_param.empty()) {
             if (extra_param.size() != cols) return StatsStatus::kInvalidArgument;
-            for (usize k = 0; k < cols; ++k) inv_scale[k] = 1.0 / extra_param[k];
+            for (usize k = 0; k < cols; ++k) {
+                if (!(extra_param[k] > 0.0)) return StatsStatus::kInvalidArgument;
+                inv_scale[k] = 1.0 / extra_param[k];
+            }
         } else {
             Array<f64> sd(cols, 0.0, scratch.allocator());
             col_std(x_col_major, rows, cols, sd.as_mut_ref());
-            for (usize k = 0; k < cols; ++k) inv_scale[k] = 1.0 / sd[k];
+            for (usize k = 0; k < cols; ++k) {
+                inv_scale[k] = (sd[k] > 0.0) ? (1.0 / sd[k]) : Limits<f64>::quiet_nan();
+            }
         }
         usize idx = 0u;
         for (usize i = 0; i < rows; ++i) {
@@ -318,13 +386,28 @@ StatsStatus pdist(ArrayRef<f64> x_col_major, usize rows, usize cols, DistanceMet
         Array<u8> valid(rows, u8{0}, scratch.allocator());
         for (usize i = 0; i < rows; ++i) {
             read_row(x_col_major, rows, cols, i, xi.as_mut_ref());
+            f64 scale = 0.0;
+            bool has_nan = false;
+            for (usize k = 0; k < cols; ++k) {
+                if (is_nan(xi[k])) {
+                    has_nan = true;
+                    break;
+                }
+                const f64 a = keel::abs(xi[k]);
+                if (a > scale) scale = a;
+            }
+            if (has_nan || !(scale > 0.0) || !is_finite(scale)) continue;
             f64 ss = 0.0;
-            for (usize k = 0; k < cols; ++k) ss += xi[k] * xi[k];
+            const f64 inv_s = 1.0 / scale;
+            for (usize k = 0; k < cols; ++k) {
+                const f64 v = xi[k] * inv_s;
+                ss += v * v;
+            }
             const f64 nrm = keel::sqrt(ss);
             if (nrm > 0.0) {
                 valid[i] = 1u;
                 f64* dst = norm_rows.data() + i * cols;
-                for (usize k = 0; k < cols; ++k) dst[k] = xi[k] / nrm;
+                for (usize k = 0; k < cols; ++k) dst[k] = (xi[k] * inv_s) / nrm;
             }
         }
         usize idx = 0u;
@@ -338,7 +421,8 @@ StatsStatus pdist(ArrayRef<f64> x_col_major, usize rows, usize cols, DistanceMet
                 const f64* uj = norm_rows.data() + j * cols;
                 f64 dot = 0.0;
                 for (usize k = 0; k < cols; ++k) dot += ui[k] * uj[k];
-                out[idx++] = 1.0 - dot;
+                const f64 dist = 1.0 - dot;
+                out[idx++] = is_nan(dist) ? dist : clamp(dist, 0.0, 2.0);
             }
         }
         return StatsStatus::kOk;
@@ -358,8 +442,12 @@ StatsStatus pdist(ArrayRef<f64> x_col_major, usize rows, usize cols, DistanceMet
 StatsStatus pdist2(ArrayRef<f64> x_col_major, usize mx, ArrayRef<f64> y_col_major, usize my,
                    usize cols, DistanceMetric metric, f64 minkowski_p, ArrayRef<f64> extra_param,
                    MutArrayRef<f64> out_col_major, Allocator* alloc) {
-    if (x_col_major.size() < mx * cols || y_col_major.size() < my * cols ||
+    if (mul_overflows(mx, cols) || mul_overflows(my, cols) || mul_overflows(mx, my) ||
+        x_col_major.size() < mx * cols || y_col_major.size() < my * cols ||
         out_col_major.size() < mx * my) {
+        return StatsStatus::kInvalidArgument;
+    }
+    if (metric == DistanceMetric::kMinkowski && !(minkowski_p > 0.0)) {
         return StatsStatus::kInvalidArgument;
     }
     if (mx == 0u || my == 0u) return StatsStatus::kOk;
@@ -369,6 +457,7 @@ StatsStatus pdist2(ArrayRef<f64> x_col_major, usize mx, ArrayRef<f64> y_col_majo
     Array<f64> yj(cols, 0.0, scratch.allocator());
 
     if (metric == DistanceMetric::kMahalanobis) {
+        if (mul_overflows(cols, cols)) return StatsStatus::kInvalidArgument;
         Array<f64> cinv(cols * cols, 0.0, scratch.allocator());
         if (!extra_param.empty()) {
             if (extra_param.size() < cols * cols) return StatsStatus::kInvalidArgument;
@@ -399,11 +488,16 @@ StatsStatus pdist2(ArrayRef<f64> x_col_major, usize mx, ArrayRef<f64> y_col_majo
         Array<f64> inv_scale(cols, 0.0, scratch.allocator());
         if (!extra_param.empty()) {
             if (extra_param.size() != cols) return StatsStatus::kInvalidArgument;
-            for (usize k = 0; k < cols; ++k) inv_scale[k] = 1.0 / extra_param[k];
+            for (usize k = 0; k < cols; ++k) {
+                if (!(extra_param[k] > 0.0)) return StatsStatus::kInvalidArgument;
+                inv_scale[k] = 1.0 / extra_param[k];
+            }
         } else {
             Array<f64> sd(cols, 0.0, scratch.allocator());
             col_std(x_col_major, mx, cols, sd.as_mut_ref());
-            for (usize k = 0; k < cols; ++k) inv_scale[k] = 1.0 / sd[k];
+            for (usize k = 0; k < cols; ++k) {
+                inv_scale[k] = (sd[k] > 0.0) ? (1.0 / sd[k]) : Limits<f64>::quiet_nan();
+            }
         }
         for (usize j = 0; j < my; ++j) {
             read_row(y_col_major, my, cols, j, yj.as_mut_ref());
@@ -436,26 +530,56 @@ StatsStatus pdist2(ArrayRef<f64> x_col_major, usize mx, ArrayRef<f64> y_col_majo
         Array<u8> valid_x(mx, u8{0}, scratch.allocator());
         for (usize i = 0; i < mx; ++i) {
             read_row(x_col_major, mx, cols, i, xi.as_mut_ref());
+            f64 scale = 0.0;
+            bool has_nan = false;
+            for (usize k = 0; k < cols; ++k) {
+                if (is_nan(xi[k])) {
+                    has_nan = true;
+                    break;
+                }
+                const f64 a = keel::abs(xi[k]);
+                if (a > scale) scale = a;
+            }
+            if (has_nan || !(scale > 0.0) || !is_finite(scale)) continue;
             f64 ss = 0.0;
-            for (usize k = 0; k < cols; ++k) ss += xi[k] * xi[k];
+            const f64 inv_s = 1.0 / scale;
+            for (usize k = 0; k < cols; ++k) {
+                const f64 v = xi[k] * inv_s;
+                ss += v * v;
+            }
             const f64 nrm = keel::sqrt(ss);
             if (nrm > 0.0) {
                 valid_x[i] = 1u;
                 f64* dst = norm_x.data() + i * cols;
-                for (usize k = 0; k < cols; ++k) dst[k] = xi[k] / nrm;
+                for (usize k = 0; k < cols; ++k) dst[k] = (xi[k] * inv_s) / nrm;
             }
         }
         Array<f64> norm_y(my * cols, 0.0, scratch.allocator());
         Array<u8> valid_y(my, u8{0}, scratch.allocator());
         for (usize j = 0; j < my; ++j) {
             read_row(y_col_major, my, cols, j, yj.as_mut_ref());
+            f64 scale = 0.0;
+            bool has_nan = false;
+            for (usize k = 0; k < cols; ++k) {
+                if (is_nan(yj[k])) {
+                    has_nan = true;
+                    break;
+                }
+                const f64 a = keel::abs(yj[k]);
+                if (a > scale) scale = a;
+            }
+            if (has_nan || !(scale > 0.0) || !is_finite(scale)) continue;
             f64 ss = 0.0;
-            for (usize k = 0; k < cols; ++k) ss += yj[k] * yj[k];
+            const f64 inv_s = 1.0 / scale;
+            for (usize k = 0; k < cols; ++k) {
+                const f64 v = yj[k] * inv_s;
+                ss += v * v;
+            }
             const f64 nrm = keel::sqrt(ss);
             if (nrm > 0.0) {
                 valid_y[j] = 1u;
                 f64* dst = norm_y.data() + j * cols;
-                for (usize k = 0; k < cols; ++k) dst[k] = yj[k] / nrm;
+                for (usize k = 0; k < cols; ++k) dst[k] = (yj[k] * inv_s) / nrm;
             }
         }
         for (usize j = 0; j < my; ++j) {
@@ -468,7 +592,8 @@ StatsStatus pdist2(ArrayRef<f64> x_col_major, usize mx, ArrayRef<f64> y_col_majo
                 const f64* ui = norm_x.data() + i * cols;
                 f64 dot = 0.0;
                 for (usize k = 0; k < cols; ++k) dot += ui[k] * uj[k];
-                out_col_major[j * mx + i] = 1.0 - dot;
+                const f64 dist = 1.0 - dot;
+                out_col_major[j * mx + i] = is_nan(dist) ? dist : clamp(dist, 0.0, 2.0);
             }
         }
         return StatsStatus::kOk;
@@ -486,7 +611,9 @@ StatsStatus pdist2(ArrayRef<f64> x_col_major, usize mx, ArrayRef<f64> y_col_majo
 
 StatsStatus squareform_to_matrix(ArrayRef<f64> condensed, usize n,
                                  MutArrayRef<f64> out_col_major) noexcept {
-    if (condensed.size() != n * (n > 0u ? n - 1u : 0u) / 2u || out_col_major.size() < n * n) {
+    usize npairs = 0u;
+    if (!safe_npairs(n, npairs) || mul_overflows(n, n) || condensed.size() != npairs ||
+        out_col_major.size() < n * n) {
         return StatsStatus::kInvalidArgument;
     }
     for (usize i = 0; i < n * n; ++i) out_col_major[i] = 0.0;
@@ -503,8 +630,9 @@ StatsStatus squareform_to_matrix(ArrayRef<f64> condensed, usize n,
 
 StatsStatus squareform_to_condensed(ArrayRef<f64> mat_col_major, usize n,
                                     MutArrayRef<f64> out_condensed) noexcept {
-    const usize npairs = n * (n > 0u ? n - 1u : 0u) / 2u;
-    if (mat_col_major.size() < n * n || out_condensed.size() < npairs) {
+    usize npairs = 0u;
+    if (!safe_npairs(n, npairs) || mul_overflows(n, n) || mat_col_major.size() < n * n ||
+        out_condensed.size() < npairs) {
         return StatsStatus::kInvalidArgument;
     }
     usize k = 0u;
@@ -518,9 +646,14 @@ StatsStatus squareform_to_condensed(ArrayRef<f64> mat_col_major, usize n,
 
 StatsStatus mahal_qr(ArrayRef<f64> y_col_major, usize my, ArrayRef<f64> x_col_major, usize mx,
                      usize cols, MutArrayRef<f64> out_d2, Allocator* alloc) {
-    if (mx < 2u || x_col_major.size() < mx * cols || y_col_major.size() < my * cols ||
-        out_d2.size() < my) {
+    if (mx < 2u || mul_overflows(mx, cols) || mul_overflows(my, cols) || mul_overflows(cols, cols) ||
+        x_col_major.size() < mx * cols || y_col_major.size() < my * cols || out_d2.size() < my) {
         return StatsStatus::kInvalidArgument;
+    }
+    if (my == 0u) return StatsStatus::kOk;
+    if (cols == 0u) {
+        for (usize r = 0; r < my; ++r) out_d2[r] = 0.0;
+        return StatsStatus::kOk;
     }
 
     ArenaTemp scratch = get_scratch(alloc);
@@ -575,7 +708,7 @@ StatsStatus mahal_qr(ArrayRef<f64> y_col_major, usize my, ArrayRef<f64> x_col_ma
         for (usize k = 0; k < cols; ++k) z[k] = 0.0;
         for (usize i = 0; i < cols; ++i) {
             const f64 rii = r_mat[i + i * cols];
-            if (keel::abs(rii) < kDiagTol) continue;
+            if (!(keel::abs(rii) >= kDiagTol)) continue;
             f64 s = dy[i];
             for (usize k = 0; k < i; ++k) s -= r_mat[k + i * cols] * z[k];
             z[i] = s / rii;

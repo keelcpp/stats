@@ -8,9 +8,21 @@ namespace keel::stats {
 
 namespace {
 
+inline bool mul_overflows(usize a, usize b) noexcept {
+    return a != 0u && b > Limits<usize>::kMax / a;
+}
+
 inline usize pdist_index(usize i, usize j, usize n) noexcept {
     if (i > j) keel::swap(i, j);
     return i * n - (i * (i + 1u)) / 2u + (j - i - 1u);
+}
+
+inline bool parse_node_id(f64 v, usize max_exclusive, i32& out_zero_based) noexcept {
+    if (!is_finite(v) || floor(v) != v || v < 1.0 || v > as<f64>(max_exclusive)) {
+        return false;
+    }
+    out_zero_based = as<i32>(v) - 1;
+    return true;
 }
 
 inline f64 lance_williams(LinkageMethod m, f64 d_ak, f64 d_bk, f64 d_ab, i32 n_a, i32 n_b,
@@ -100,6 +112,9 @@ void collect_depths(i32 id, usize n, ArrayRef<i32> a, ArrayRef<i32> b, ArrayRef<
 StatsStatus linkage(ArrayRef<f64> pdist_condensed, usize n, LinkageMethod method,
                     MutArrayRef<f64> out_z_col_major, Allocator* alloc) {
     if (n < 2u) return StatsStatus::kOk;
+    if (n > as<usize>(Limits<i32>::kMax / 2) || mul_overflows(n, n)) {
+        return StatsStatus::kInvalidArgument;
+    }
     const usize expected = n * (n - 1u) / 2u;
     const usize rows = n - 1u;
     if (pdist_condensed.size() != expected || out_z_col_major.size() < rows * 3u) {
@@ -127,14 +142,20 @@ StatsStatus linkage(ArrayRef<f64> pdist_condensed, usize n, LinkageMethod method
         usize bi = 0u;
         usize bj = 1u;
         f64 bd = Limits<f64>::infinity();
+        bool found = false;
         for (usize i = 0; i < m; ++i) {
             for (usize j = i + 1u; j < m; ++j) {
-                if (dm[i * n + j] <= bd) {
-                    bd = dm[i * n + j];
+                const f64 dij = dm[i * n + j];
+                if (dij <= bd) {
+                    bd = dij;
                     bi = i;
                     bj = j;
+                    found = true;
                 }
             }
+        }
+        if (!found) {
+            bd = dm[0u * n + 1u];
         }
 
         i32 a_id = ids[bi];
@@ -174,9 +195,11 @@ StatsStatus linkage(ArrayRef<f64> pdist_condensed, usize n, LinkageMethod method
 
 StatsStatus inconsistent(ArrayRef<f64> z_col_major, usize num_merges, i32 depth,
                          MutArrayRef<f64> out_col_major, Allocator* alloc) {
-    if (z_col_major.size() < num_merges * 3u || out_col_major.size() < num_merges * 4u) {
+    if (mul_overflows(num_merges, 4u) || z_col_major.size() < num_merges * 3u ||
+        out_col_major.size() < num_merges * 4u) {
         return StatsStatus::kInvalidArgument;
     }
+    if (num_merges == 0u) return StatsStatus::kOk;
     if (depth <= 0) depth = 2;
     const usize n = num_merges + 1u;
 
@@ -185,8 +208,10 @@ StatsStatus inconsistent(ArrayRef<f64> z_col_major, usize num_merges, i32 depth,
     Array<i32> b(num_merges, 0, scratch.allocator());
     Array<f64> d(num_merges, 0.0, scratch.allocator());
     for (usize i = 0; i < num_merges; ++i) {
-        a[i] = as<i32>(z_col_major[0u * num_merges + i]) - 1;
-        b[i] = as<i32>(z_col_major[1u * num_merges + i]) - 1;
+        if (!parse_node_id(z_col_major[0u * num_merges + i], n + i, a[i]) ||
+            !parse_node_id(z_col_major[1u * num_merges + i], n + i, b[i]) || a[i] == b[i]) {
+            return StatsStatus::kInvalidArgument;
+        }
         d[i] = z_col_major[2u * num_merges + i];
     }
 
@@ -215,6 +240,9 @@ StatsStatus inconsistent(ArrayRef<f64> z_col_major, usize num_merges, i32 depth,
 
 StatsStatus cluster_maxclust(ArrayRef<f64> z_col_major, usize num_merges, i32 max_clust,
                              MutArrayRef<i32> out_labels, Allocator* alloc) {
+    if (mul_overflows(num_merges, 3u) || num_merges > as<usize>(Limits<i32>::kMax / 2)) {
+        return StatsStatus::kInvalidArgument;
+    }
     const usize n = num_merges + 1u;
     if (z_col_major.size() < num_merges * 3u || out_labels.size() < n) {
         return StatsStatus::kInvalidArgument;
@@ -235,8 +263,12 @@ StatsStatus cluster_maxclust(ArrayRef<f64> z_col_major, usize num_merges, i32 ma
             return x;
         };
         for (usize i = 0; i < merges; ++i) {
-            const i32 a_i = as<i32>(z_col_major[0u * num_merges + i]) - 1;
-            const i32 b_i = as<i32>(z_col_major[1u * num_merges + i]) - 1;
+            i32 a_i = 0;
+            i32 b_i = 0;
+            if (!parse_node_id(z_col_major[0u * num_merges + i], n + i, a_i) ||
+                !parse_node_id(z_col_major[1u * num_merges + i], n + i, b_i) || a_i == b_i) {
+                return StatsStatus::kInvalidArgument;
+            }
             const i32 newid = as<i32>(n + i);
             i32 rx = find_root(a_i);
             i32 ry = find_root(newid);
@@ -272,6 +304,9 @@ StatsStatus cluster_maxclust(ArrayRef<f64> z_col_major, usize num_merges, i32 ma
 StatsStatus cluster_cutoff(ArrayRef<f64> z_col_major, usize num_merges, f64 cutoff,
                            bool by_distance, i32 depth, MutArrayRef<i32> out_labels,
                            Allocator* alloc) {
+    if (mul_overflows(num_merges, 3u) || num_merges > as<usize>(Limits<i32>::kMax / 2)) {
+        return StatsStatus::kInvalidArgument;
+    }
     const usize n = num_merges + 1u;
     if (z_col_major.size() < num_merges * 3u || out_labels.size() < n) {
         return StatsStatus::kInvalidArgument;
@@ -288,8 +323,10 @@ StatsStatus cluster_cutoff(ArrayRef<f64> z_col_major, usize num_merges, f64 cuto
     Array<i32> b(num_merges, 0, scratch.allocator());
     Array<f64> score(num_merges, 0.0, scratch.allocator());
     for (usize i = 0; i < num_merges; ++i) {
-        a[i] = as<i32>(z_col_major[0u * num_merges + i]) - 1;
-        b[i] = as<i32>(z_col_major[1u * num_merges + i]) - 1;
+        if (!parse_node_id(z_col_major[0u * num_merges + i], n + i, a[i]) ||
+            !parse_node_id(z_col_major[1u * num_merges + i], n + i, b[i]) || a[i] == b[i]) {
+            return StatsStatus::kInvalidArgument;
+        }
         score[i] = z_col_major[2u * num_merges + i];
     }
 
@@ -310,11 +347,19 @@ StatsStatus cluster_cutoff(ArrayRef<f64> z_col_major, usize num_merges, f64 cuto
 
 StatsStatus cophenet(ArrayRef<f64> z_col_major, usize num_merges, ArrayRef<f64> pdist_condensed,
                      MutArrayRef<f64> out_dcoph, f64& out_corr, Allocator* alloc) {
+    if (mul_overflows(num_merges, 3u) || num_merges > as<usize>(Limits<i32>::kMax / 2)) {
+        return StatsStatus::kInvalidArgument;
+    }
     const usize n = num_merges + 1u;
+    if (mul_overflows(n, n - 1u)) return StatsStatus::kInvalidArgument;
     const usize yn = n * (n - 1u) / 2u;
     if (z_col_major.size() < num_merges * 3u || pdist_condensed.size() != yn ||
         (!out_dcoph.empty() && out_dcoph.size() < yn)) {
         return StatsStatus::kInvalidArgument;
+    }
+    if (yn == 0u) {
+        out_corr = Limits<f64>::quiet_nan();
+        return StatsStatus::kOk;
     }
 
     ArenaTemp scratch = get_scratch(alloc);
@@ -325,8 +370,14 @@ StatsStatus cophenet(ArrayRef<f64> z_col_major, usize num_merges, ArrayRef<f64> 
 
     Array<f64> dcoph(yn, 0.0, scratch.allocator());
     for (usize i = 0; i < num_merges; ++i) {
-        const usize a_i = as<usize>(as<i32>(z_col_major[0u * num_merges + i]) - 1);
-        const usize b_i = as<usize>(as<i32>(z_col_major[1u * num_merges + i]) - 1);
+        i32 ai32 = 0;
+        i32 bi32 = 0;
+        if (!parse_node_id(z_col_major[0u * num_merges + i], n + i, ai32) ||
+            !parse_node_id(z_col_major[1u * num_merges + i], n + i, bi32) || ai32 == bi32) {
+            return StatsStatus::kInvalidArgument;
+        }
+        const usize a_i = as<usize>(ai32);
+        const usize b_i = as<usize>(bi32);
         const f64 dist = z_col_major[2u * num_merges + i];
         const usize newid = n + i;
         const Array<i32>& lhs = members[a_i];
@@ -357,7 +408,7 @@ StatsStatus cophenet(ArrayRef<f64> z_col_major, usize num_merges, ArrayRef<f64> 
         sy2 += dy * dy;
     }
     const f64 denom = keel::sqrt(sx2) * keel::sqrt(sy2);
-    out_corr = (denom > 0.0) ? (sxy / denom) : 0.0;
+    out_corr = (denom > 0.0) ? clamp(sxy / denom, -1.0, 1.0) : 0.0;
 
     if (!out_dcoph.empty()) {
         for (usize i = 0; i < yn; ++i) out_dcoph[i] = dcoph[i];

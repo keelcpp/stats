@@ -6,13 +6,17 @@ namespace keel::stats {
 
 namespace {
 
+inline bool mul_overflows(usize a, usize b) noexcept {
+    return a != 0u && b > Limits<usize>::kMax / a;
+}
+
 // Column-major Cholesky factorization M = L * L^T (lower-triangular L).
 bool cholesky_col(const f64* M, f64* L, usize d) noexcept {
     for (usize i = 0; i < d * d; ++i) L[i] = 0.0;
     for (usize j = 0; j < d; ++j) {
         f64 s = M[j + j * d];
         for (usize k = 0; k < j; ++k) s -= L[j + k * d] * L[j + k * d];
-        if (!(s > 0.0)) return false;
+        if (!(s > 0.0) || !is_finite(s)) return false;
         const f64 ljj = sqrt(s);
         L[j + j * d] = ljj;
         for (usize i = j + 1; i < d; ++i) {
@@ -52,7 +56,7 @@ bool gauss_solve_row(f64* M, f64* b, usize p) noexcept {
                 piv = rr;
             }
         }
-        if (pmax == 0.0) return false;
+        if (!(pmax > 0.0) || !is_finite(pmax)) return false;
         if (piv != k) {
             for (usize j = 0; j < p; ++j) keel::swap(M[k * p + j], M[piv * p + j]);
             keel::swap(b[k], b[piv]);
@@ -85,7 +89,7 @@ inline f64 inv_link(f64 e, GlmLink link) noexcept {
         case GlmLink::kLogit:
             return sigmoid(e);
         case GlmLink::kLog:
-            return exp(e);
+            return exp(clamp(e, -500.0, 500.0));
         case GlmLink::kReciprocal: {
             const f64 r = (abs(e) > 1e-300) ? e : ((e < 0.0) ? -1e-300 : 1e-300);
             return 1.0 / r;
@@ -147,7 +151,7 @@ inline f64 initial_mu(f64 yi, GlmDist d) noexcept {
         case GlmDist::kNormal:
             return yi;
         case GlmDist::kBinomial:
-            return (yi + 0.5) / 2.0;
+            return (clamp(yi, 0.0, 1.0) + 0.5) / 2.0;
         case GlmDist::kPoisson:
             return max(yi + 0.1, 0.1);
         case GlmDist::kGamma:
@@ -213,7 +217,8 @@ StatsStatus regress(ArrayRef<f64> y, ArrayRef<f64> x_col_major, usize n, usize p
                     MutArrayRef<f64> out_beta, MutArrayRef<f64> out_bint_col_major,
                     MutArrayRef<f64> out_r, MutArrayRef<f64> out_rint_col_major,
                     RegressStats& out_stats, Allocator* alloc) {
-    if (n == 0 || p == 0 || y.size() != n || x_col_major.size() != n * p) {
+    if (n == 0 || p == 0 || !(alpha > 0.0 && alpha < 1.0) || mul_overflows(n, p) ||
+        mul_overflows(p, p) || y.size() != n || x_col_major.size() != n * p) {
         return StatsStatus::kInvalidArgument;
     }
     if (out_beta.size() != p || out_bint_col_major.size() != 2 * p || out_r.size() != n ||
@@ -289,10 +294,17 @@ StatsStatus regress(ArrayRef<f64> y, ArrayRef<f64> x_col_major, usize n, usize p
     }
     const f64 r2 = (ss_tot > 0.0) ? (1.0 - ssr / ss_tot) : nan_v;
     const f64 df_model = as<f64>(p) - 1.0;
-    const f64 f_stat = (df_model > 0.0 && df_err > 0.0 && (1.0 - r2) > 0.0)
-                           ? ((r2 / df_model) / ((1.0 - r2) / df_err))
-                           : nan_v;
-    const f64 p_f = !is_nan(f_stat) ? max(0.0, 1.0 - f_cdf(f_stat, df_model, df_err)) : nan_v;
+    f64 f_stat = nan_v;
+    f64 p_f = nan_v;
+    if (df_model > 0.0 && df_err > 0.0 && !is_nan(r2)) {
+        if (ssr == 0.0 && ss_tot > 0.0) {
+            f_stat = Limits<f64>::infinity();
+            p_f = 0.0;
+        } else if ((1.0 - r2) > 0.0) {
+            f_stat = (r2 / df_model) / ((1.0 - r2) / df_err);
+            p_f = max(0.0, 1.0 - f_cdf(f_stat, df_model, df_err));
+        }
+    }
     out_stats = RegressStats{r2, f_stat, p_f, sigma2};
 
     const f64 nu = df_err;
@@ -329,16 +341,26 @@ StatsStatus lscov(ArrayRef<f64> a_col_major, ArrayRef<f64> b, usize n, usize p,
                   ArrayRef<f64> weights, bool is_full_cov, MutArrayRef<f64> out_x,
                   MutArrayRef<f64> out_stdx, f64& out_mse, MutArrayRef<f64> out_s_col_major,
                   Allocator* alloc) {
-    if (n == 0 || p == 0 || b.size() != n || a_col_major.size() != n * p) {
+    if (n == 0 || p == 0 || mul_overflows(n, p) || mul_overflows(p, p) || b.size() != n ||
+        a_col_major.size() != n * p) {
         return StatsStatus::kInvalidArgument;
     }
     if (out_x.size() != p || out_stdx.size() != p || out_s_col_major.size() != p * p) {
         return StatsStatus::kInvalidArgument;
     }
     const bool weighted = !weights.empty();
-    const bool full_cov = weighted && is_full_cov && n > 1;
-    if (full_cov && weights.size() != n * n) return StatsStatus::kInvalidArgument;
+    const bool full_cov = weighted && is_full_cov;
+    if (full_cov && (mul_overflows(n, n) || weights.size() != n * n)) {
+        return StatsStatus::kInvalidArgument;
+    }
     if (weighted && !full_cov && weights.size() != n) return StatsStatus::kInvalidArgument;
+    if (weighted && !full_cov) {
+        for (usize i = 0; i < n; ++i) {
+            if (!(weights[i] >= 0.0) || !is_finite(weights[i])) {
+                return StatsStatus::kInvalidArgument;
+            }
+        }
+    }
 
     Array<f64> xtwx(p * p, 0.0, alloc);
     Array<f64> xtwy(p, 0.0, alloc);
@@ -432,7 +454,8 @@ StatsStatus lscov(ArrayRef<f64> a_col_major, ArrayRef<f64> b, usize n, usize p,
         for (usize i = 0; i < p; ++i) out_s_col_major[i + j * p] = out_mse * mj[i];
     }
     for (usize j = 0; j < p; ++j) {
-        out_stdx[j] = sqrt(max(out_s_col_major[j + j * p], 0.0));
+        const f64 v = out_s_col_major[j + j * p];
+        out_stdx[j] = is_nan(v) ? v : sqrt(max(v, 0.0));
     }
     return StatsStatus::kOk;
 }
@@ -442,9 +465,13 @@ StatsStatus ridge(ArrayRef<f64> y, ArrayRef<f64> x_col_major, usize n, usize p,
                   Allocator* alloc) {
     const usize nk = k_vals.size();
     const usize out_rows = scaled ? p : (p + 1);
-    if (n == 0 || p == 0 || nk == 0 || y.size() != n || x_col_major.size() != n * p ||
+    if (n == 0 || p == 0 || nk == 0 || mul_overflows(n, p) || mul_overflows(p, p) ||
+        mul_overflows(out_rows, nk) || y.size() != n || x_col_major.size() != n * p ||
         out_b_col_major.size() != out_rows * nk) {
         return StatsStatus::kInvalidArgument;
+    }
+    for (usize i = 0; i < nk; ++i) {
+        if (!(k_vals[i] >= 0.0) || !is_finite(k_vals[i])) return StatsStatus::kInvalidArgument;
     }
 
     f64 y_mean = 0.0;
@@ -516,7 +543,8 @@ StatsStatus ridge(ArrayRef<f64> y, ArrayRef<f64> x_col_major, usize n, usize p,
 StatsStatus glmfit(ArrayRef<f64> x_col_major, ArrayRef<f64> y, usize n, usize p_in, GlmDist distr,
                    GlmLink link, GlmFitOut& out, Allocator* alloc) {
     const usize p = p_in + 1;
-    if (n == 0 || y.size() != n || x_col_major.size() != n * p_in || n <= p) {
+    if (n == 0 || mul_overflows(n, p) || mul_overflows(p, p) || y.size() != n ||
+        x_col_major.size() != n * p_in || n <= p) {
         return StatsStatus::kInvalidArgument;
     }
 
@@ -538,9 +566,11 @@ StatsStatus glmfit(ArrayRef<f64> x_col_major, ArrayRef<f64> y, usize n, usize p_
             case GlmLink::kIdentity:
                 eta[i] = mu[i];
                 break;
-            case GlmLink::kLogit:
-                eta[i] = log(mu[i] / (1.0 - mu[i]));
+            case GlmLink::kLogit: {
+                const f64 m = clamp(mu[i], 1e-12, 1.0 - 1e-12);
+                eta[i] = log(m / (1.0 - m));
                 break;
+            }
             case GlmLink::kLog:
                 eta[i] = log(max(mu[i], 1e-12));
                 break;
@@ -549,7 +579,7 @@ StatsStatus glmfit(ArrayRef<f64> x_col_major, ArrayRef<f64> y, usize n, usize p_
                 break;
             case GlmLink::kProbit: {
                 const f64 m = clamp(mu[i], 1e-12, 1.0 - 1e-12);
-                eta[i] = log(m / (1.0 - m)) / 1.6;
+                eta[i] = norm_inv(m, 0.0, 1.0);
                 break;
             }
         }
@@ -581,7 +611,10 @@ StatsStatus glmfit(ArrayRef<f64> x_col_major, ArrayRef<f64> y, usize n, usize p_
             for (usize k = 0; k < n; ++k) s += xb[i * n + k] * w[k] * z[k];
             b[i] = s;
         }
-        if (!gauss_solve_row(M.data(), b.data(), p)) break;
+        if (!gauss_solve_row(M.data(), b.data(), p)) {
+            if (it == 0) return StatsStatus::kSingularMatrix;
+            break;
+        }
 
         for (usize j = 0; j < p; ++j) {
             beta_prev[j] = beta[j];
@@ -618,7 +651,7 @@ StatsStatus glmfit(ArrayRef<f64> x_col_major, ArrayRef<f64> y, usize n, usize p_
     }
 
     const f64 dfe = as<f64>(n - p);
-    const f64 sfit = sqrt(dev / dfe);
+    const f64 sfit = sqrt(max(0.0, dev) / dfe);
     const bool estdisp = (distr == GlmDist::kNormal || distr == GlmDist::kGamma ||
                           distr == GlmDist::kInverseGaussian);
     const f64 s_disp =
@@ -677,7 +710,8 @@ StatsStatus glmfit(ArrayRef<f64> x_col_major, ArrayRef<f64> y, usize n, usize p_
 
 StatsStatus glmval(ArrayRef<f64> beta, ArrayRef<f64> x_col_major, usize m, usize p_in,
                    GlmLink link, MutArrayRef<f64> out_y) noexcept {
-    if (beta.size() != p_in + 1 || x_col_major.size() != m * p_in || out_y.size() != m) {
+    if (mul_overflows(m, p_in) || beta.size() != p_in + 1 || x_col_major.size() != m * p_in ||
+        out_y.size() != m) {
         return StatsStatus::kInvalidArgument;
     }
     for (usize i = 0; i < m; ++i) {
